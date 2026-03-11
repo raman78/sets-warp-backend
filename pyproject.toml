@@ -1,0 +1,41 @@
+[project]
+name = "sets-warp-backend"
+version = "0.1.0"
+description = "WARP Knowledge Backend — community icon recognition for SETS-WARP"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.29.0",
+    "huggingface-hub>=0.24.0",
+    "pydantic>=2.6.0",
+    "opencv-python-headless>=4.9.0",
+    "numpy>=1.26.0",
+]
+
+[project.scripts]
+warp-backend-setup = "setup:main"
+warp-backend       = "main:app"
+
+[build-system]
+requires      = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[tool.sets-warp-backend]
+# Konfiguracja backendu — edytuj przed deployem
+# Wartości można nadpisać zmiennymi środowiskowymi (HF_TOKEN, HF_REPO_ID, itd.)
+
+[tool.sets-warp-backend.huggingface]
+repo_id   = "sets-sto/warp-knowledge"
+# token — NIE wpisuj tu! Ustaw jako zmienną środowiskową HF_TOKEN
+# lub wpisz w .env (który jest w .gitignore)
+
+[tool.sets-warp-backend.server]
+host            = "0.0.0.0"
+port            = 8000
+max_req_per_ip  = 500
+
+[tool.sets-warp-backend.storage]
+# Ile dni trzymać surowe contributions zanim trafią do archiwum
+contribution_retention_days = 90
+# Minimalna liczba potwierdzeń żeby wpis trafił do knowledge.json
+min_confirmations = 2
