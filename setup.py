@@ -64,9 +64,32 @@ def main():
 # ── Step implementations ───────────────────────────────────────────────────────
 
 def _install_deps():
+    venv_dir = HERE / '.venv'
+
+    # Stwórz venv jeśli nie istnieje
+    if not venv_dir.exists():
+        info('Tworzę wirtualne środowisko .venv ...')
+        result = subprocess.run(
+            [sys.executable, '-m', 'venv', str(venv_dir)],
+            cwd=HERE
+        )
+        if result.returncode != 0:
+            err('Nie można stworzyć venv')
+            sys.exit(1)
+        ok('.venv utworzony')
+    else:
+        ok('.venv już istnieje')
+
+    # Użyj pip z venv
+    venv_pip    = venv_dir / 'bin' / 'pip'
+    venv_python = venv_dir / 'bin' / 'python'
+    if not venv_pip.exists():    # Windows
+        venv_pip    = venv_dir / 'Scripts' / 'pip.exe'
+        venv_python = venv_dir / 'Scripts' / 'python.exe'
+
     info('Instaluję zależności z pyproject.toml ...')
     result = subprocess.run(
-        [sys.executable, '-m', 'pip', 'install', '-e', '.', '--quiet'],
+        [str(venv_pip), 'install', '-e', '.', '--quiet'],
         cwd=HERE
     )
     if result.returncode == 0:
@@ -75,6 +98,11 @@ def _install_deps():
         err('Błąd instalacji — sprawdź output powyżej')
         if not _ask_yn('Kontynuować mimo błędu?'):
             sys.exit(1)
+
+    # Jeśli nie jesteśmy jeszcze w venv — uruchom ponownie z venv
+    if sys.executable != str(venv_python) and venv_python.exists():
+        info('Restartuję w środowisku venv ...')
+        os.execv(str(venv_python), [str(venv_python)] + sys.argv)
 
 
 def _configure_env():
