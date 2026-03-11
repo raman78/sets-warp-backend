@@ -25,7 +25,8 @@ import os
 import subprocess
 import sys
 from collections import Counter
-from datetime import datetime, date
+from datetime import datetime, date, timezone
+UTC = timezone.utc
 from pathlib import Path
 
 # ── Auto-restart w .venv jeśli potrzeba ───────────────────────────────────────
@@ -157,7 +158,7 @@ def _hf_save_knowledge(knowledge: dict[str, str]) -> bool:
         payload = json.dumps(
             {
                 'knowledge':  knowledge,
-                'updated_at': datetime.utcnow().isoformat() + 'Z',
+                'updated_at': datetime.now(UTC).isoformat() + 'Z',
                 'entries':    len(knowledge),
             },
             ensure_ascii=False,
@@ -169,7 +170,7 @@ def _hf_save_knowledge(knowledge: dict[str, str]) -> bool:
             repo_id=HF_REPO_ID,
             repo_type='dataset',
             commit_message=f'admin_merge: {len(knowledge)} entries '
-                           f'({datetime.utcnow().strftime("%Y-%m-%d %H:%M")} UTC)',
+                           f'({datetime.now(UTC).strftime("%Y-%m-%d %H:%M")} UTC)',
         )
         return True
     except Exception as e:
@@ -324,7 +325,7 @@ def main():
     # 5. Lokalny export
     if args.export:
         Path(args.export).write_text(
-            json.dumps({'knowledge': merged, 'updated_at': datetime.utcnow().isoformat() + 'Z'},
+            json.dumps({'knowledge': merged, 'updated_at': datetime.now(UTC).isoformat() + 'Z'},
                        ensure_ascii=False, indent=2),
             encoding='utf-8',
         )

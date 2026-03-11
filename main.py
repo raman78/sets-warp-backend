@@ -30,7 +30,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from pathlib import Path
 from typing import Any
 
@@ -152,7 +152,7 @@ async def contribute(req: ContributeRequest, request: Request):
         'wrong_name':      req.wrong_name,
         'confirmed':       req.confirmed,
         'warp_version':    req.warp_version,
-        'timestamp':       req.timestamp or datetime.utcnow().isoformat() + 'Z',
+        'timestamp':       req.timestamp or datetime.now(timezone.utc).isoformat() + 'Z',
         'ip_hash':         hashlib.sha256(client_ip.encode()).hexdigest()[:8],
     }
 
@@ -219,7 +219,7 @@ async def admin_merge(
     # Write back to HF
     ok = _hf_upload_files({
         'knowledge.json': json.dumps(
-            {'knowledge': merged, 'updated_at': datetime.utcnow().isoformat() + 'Z'},
+            {'knowledge': merged, 'updated_at': datetime.now(timezone.utc).isoformat() + 'Z'},
             ensure_ascii=False, indent=2
         ).encode('utf-8')
     })
