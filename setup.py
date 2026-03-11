@@ -37,6 +37,14 @@ def hdr(msg): print(f'\n{W}{'─'*50}\n  {msg}\n{'─'*50}{RS}')
 
 
 def main():
+    # Sprawdź wersję Pythona
+    major, minor = sys.version_info[:2]
+    if (major, minor) >= (3, 14):
+        warn(f'Python {major}.{minor} może być niekompatybilny z niektórymi zależnościami.')
+        warn('Zalecany Python 3.11–3.12. Sprawdź: python3.12 setup.py')
+        if not _ask_yn('Kontynuować mimo to?', default=False):
+            sys.exit(0)
+
     print(f'\n{W}WARP Knowledge Backend — Konfigurator{RS}')
     print(f'{"═"*40}')
 
@@ -89,7 +97,7 @@ def _install_deps():
 
     info('Instaluję zależności z pyproject.toml ...')
     result = subprocess.run(
-        [str(venv_pip), 'install', '-e', '.', '--quiet'],
+        [str(venv_pip), 'install', '-r', 'requirements.txt', '--quiet'],
         cwd=HERE
     )
     if result.returncode == 0:
