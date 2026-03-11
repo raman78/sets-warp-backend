@@ -138,7 +138,7 @@ def _ensure_python():
     fd, tmp = tempfile.mkstemp(suffix='.zip' if IS_WINDOWS else '.tar.gz')
     os.close(fd)
     try:
-        last=[−1]
+        last=[-1]
         def prog(c,b,t):
             if t>0:
                 p=min(100,c*b*100//t)
