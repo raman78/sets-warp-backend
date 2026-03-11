@@ -97,20 +97,55 @@ def _read_toml(key):
     except: return None
 
 
+def _venv_python_version() -> tuple[int,int] | None:
+    """Zwróć (major, minor) Pythona w venv, lub None jeśli brak/błąd."""
+    vp = _venv_python()
+    if not vp.exists(): return None
+    try:
+        r = subprocess.run([str(vp), '-c',
+            'import sys; print(sys.version_info.major, sys.version_info.minor)'],
+            capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            major, minor = map(int, r.stdout.strip().split())
+            return (major, minor)
+    except Exception:
+        pass
+    return None
+
+
+def _cleanup_stale():
+    """Usuń .venv i .python jeśli są niekompatybilne lub uszkodzone."""
+    import shutil
+    venv_ver = _venv_python_version()
+    if venv_ver is not None and venv_ver == (3, 12):
+        return   # wszystko OK
+
+    if venv_ver is not None:
+        warn(f'Stary venv ma Python {venv_ver[0]}.{venv_ver[1]} (potrzebny 3.12) — czyszczę ...')
+    elif VENV_DIR.exists():
+        warn('Uszkodzony lub niekompletny venv — czyszczę ...')
+
+    for d in [VENV_DIR, PYTHON_DIR]:
+        if d.exists():
+            shutil.rmtree(d)
+            ok(f'Usunięto: {d}')
+
+
 def main():
     print(f'\n{W}WARP Knowledge Backend — Konfigurator{RS}\n{"═"*40}')
 
     if _in_our_venv():
-        ok('Uruchomiony w venv')
+        ok(f'Uruchomiony w venv (Python {sys.version.split()[0]})')
         hdr('Konfiguracja HF Token');  _configure_env()
         hdr('Konfiguracja serwera');   _configure_toml()
         hdr('Test połączenia');        _test_hf()
         hdr('Uruchomienie');           _prompt_start()
         return
 
-    hdr('1. Portable Python');   _ensure_python()
-    hdr('2. Wirtualne środowisko'); _ensure_venv()
-    hdr('3. Zależności');        _install_deps()
+    hdr('0. Sprawdzam środowisko');  _cleanup_stale()
+    hdr('1. Portable Python');       _ensure_python()
+    hdr('2. Wirtualne środowisko');  _ensure_venv()
+    hdr('3. Zależności');            _install_deps()
 
     vp = _venv_python()
     if vp.exists() and Path(sys.executable).resolve() != vp.resolve():
