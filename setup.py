@@ -1,266 +1,246 @@
 #!/usr/bin/env python3
-# setup.py
-# WARP Backend Configurator
-#
+# setup.py — WARP Backend Konfigurator
 # Uruchom: python setup.py
 #
-# Co robi:
-#   1. Instaluje zależności (pip install -e .)
-#   2. Pyta o HF_TOKEN i zapisuje do .env
-#   3. Pozwala zmienić konfigurację w pyproject.toml
-#   4. Testuje połączenie z HF i backendem
-#   5. Opcjonalnie uruchamia serwer lokalnie
+# 1. Pobiera portable Python 3.12 do .python/  (brak root, brak kompilacji)
+# 2. Tworzy .venv z tym Pythonem
+# 3. Instaluje zależności z requirements.txt
+# 4. Pyta o HF_TOKEN → zapisuje do .env
+# 5. Konfiguracja w pyproject.toml
+# 6. Test połączenia z HF
+# 7. Opcjonalnie uruchamia serwer
 
 from __future__ import annotations
-
-import os
-import re
-import subprocess
-import sys
+import os, platform, re, subprocess, sys, tarfile, tempfile, urllib.request, zipfile
 from pathlib import Path
 
-HERE = Path(__file__).parent
+HERE       = Path(__file__).resolve().parent
+PYTHON_DIR = HERE / '.python'
+VENV_DIR   = HERE / '.venv'
+IS_WINDOWS = sys.platform == 'win32'
+IS_MAC     = sys.platform == 'darwin'
+ARCH       = platform.machine().lower()
 
-# ── ANSI colors ────────────────────────────────────────────────────────────────
-G  = '\033[92m'   # green
-Y  = '\033[93m'   # yellow
-R  = '\033[91m'   # red
-B  = '\033[94m'   # blue
-W  = '\033[97m'   # white bold
-RS = '\033[0m'    # reset
+PBS_BASE    = 'https://github.com/astral-sh/python-build-standalone/releases/download'
+PBS_TAG     = '20250317'
+PBS_VERSION = '3.12.9'
+PBS_TARGETS = {
+    ('linux',   'x86_64'):  f'cpython-{PBS_VERSION}+{PBS_TAG}-x86_64-unknown-linux-gnu-install_only.tar.gz',
+    ('linux',   'aarch64'): f'cpython-{PBS_VERSION}+{PBS_TAG}-aarch64-unknown-linux-gnu-install_only.tar.gz',
+    ('darwin',  'x86_64'):  f'cpython-{PBS_VERSION}+{PBS_TAG}-x86_64-apple-darwin-install_only.tar.gz',
+    ('darwin',  'arm64'):   f'cpython-{PBS_VERSION}+{PBS_TAG}-aarch64-apple-darwin-install_only.tar.gz',
+    ('windows', 'x86_64'):  f'cpython-{PBS_VERSION}+{PBS_TAG}-x86_64-pc-windows-msvc-install_only.zip',
+}
 
-def ok(msg):  print(f'{G}  ✓ {msg}{RS}')
-def err(msg): print(f'{R}  ✗ {msg}{RS}')
-def info(msg):print(f'{B}  → {msg}{RS}')
-def warn(msg):print(f'{Y}  ! {msg}{RS}')
-def hdr(msg): print(f'\n{W}{'─'*50}\n  {msg}\n{'─'*50}{RS}')
+G='\033[92m'; Y='\033[93m'; R='\033[91m'; B='\033[94m'; W='\033[97m'; RS='\033[0m'
+def ok(m):   print(f'{G}  ✓ {m}{RS}')
+def err(m):  print(f'{R}  ✗ {m}{RS}')
+def info(m): print(f'{B}  → {m}{RS}')
+def warn(m): print(f'{Y}  ! {m}{RS}')
+def hdr(m):  print(f'\n{W}{"─"*50}\n  {m}\n{"─"*50}{RS}')
+
+
+def _platform_key():
+    if IS_WINDOWS: return ('windows', 'x86_64')
+    sn   = 'darwin' if IS_MAC else 'linux'
+    arch = ('arm64' if ARCH in ('arm64','aarch64') and IS_MAC
+            else 'aarch64' if ARCH == 'aarch64' else 'x86_64')
+    return (sn, arch)
+
+def _portable_exe() -> Path | None:
+    if IS_WINDOWS:
+        p = PYTHON_DIR / 'python' / 'python.exe'
+        return p if p.exists() else None
+    for c in [PYTHON_DIR/'python'/'bin'/f'python{PBS_VERSION[:4]}',
+              PYTHON_DIR/'python'/'bin'/'python3',
+              PYTHON_DIR/'python'/'bin'/'python']:
+        if c.exists(): return c
+    return None
+
+def _venv_python() -> Path:
+    return VENV_DIR/('Scripts/python.exe' if IS_WINDOWS else 'bin/python')
+
+def _venv_pip() -> Path:
+    return VENV_DIR/('Scripts/pip.exe' if IS_WINDOWS else 'bin/pip')
+
+def _venv_uvicorn() -> Path:
+    return VENV_DIR/('Scripts/uvicorn' if IS_WINDOWS else 'bin/uvicorn')
+
+def _in_our_venv() -> bool:
+    try: return Path(sys.executable).resolve() == _venv_python().resolve()
+    except: return False
+
+def _ask_yn(prompt, default=True) -> bool:
+    ans = input(f'  {prompt}{" [T/n]" if default else " [t/N]"}: ').strip().lower()
+    return default if not ans else ans in ('t','y','tak','yes')
+
+def _load_env(path):
+    if not path.exists(): return {}
+    r = {}
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith('#') and '=' in line:
+            k,_,v = line.partition('=')
+            r[k.strip()] = v.strip().strip('"').strip("'")
+    return r
+
+def _save_env(path, vars):
+    lines = ['# WARP Backend — NIE commituj!\n']
+    lines += [f'{k}={v}' for k,v in vars.items()]
+    path.write_text('\n'.join(lines)+'\n')
+
+def _read_toml(key):
+    try:
+        m = re.search(rf'{re.escape(key)}\s*=\s*["\']?([^"\'#\n]+)["\']?',
+                      (HERE/'pyproject.toml').read_text())
+        return m.group(1).strip() if m else None
+    except: return None
 
 
 def main():
-    # Sprawdź wersję Pythona
-    major, minor = sys.version_info[:2]
-    if (major, minor) >= (3, 14):
-        warn(f'Python {major}.{minor} może być niekompatybilny z niektórymi zależnościami.')
-        warn('Zalecany Python 3.11–3.12. Sprawdź: python3.12 setup.py')
-        if not _ask_yn('Kontynuować mimo to?', default=False):
-            sys.exit(0)
+    print(f'\n{W}WARP Knowledge Backend — Konfigurator{RS}\n{"═"*40}')
 
-    print(f'\n{W}WARP Knowledge Backend — Konfigurator{RS}')
-    print(f'{"═"*40}')
+    if _in_our_venv():
+        ok('Uruchomiony w venv')
+        hdr('Konfiguracja HF Token');  _configure_env()
+        hdr('Konfiguracja serwera');   _configure_toml()
+        hdr('Test połączenia');        _test_hf()
+        hdr('Uruchomienie');           _prompt_start()
+        return
 
-    # ── Krok 1: Instalacja zależności ──────────────────────────────────────────
-    hdr('1. Instalacja zależności')
-    _install_deps()
+    hdr('1. Portable Python');   _ensure_python()
+    hdr('2. Wirtualne środowisko'); _ensure_venv()
+    hdr('3. Zależności');        _install_deps()
 
-    # ── Krok 2: Konfiguracja .env ──────────────────────────────────────────────
-    hdr('2. Konfiguracja HF Token')
-    _configure_env()
+    vp = _venv_python()
+    if vp.exists() and Path(sys.executable).resolve() != vp.resolve():
+        info('Restartuję w venv ...')
+        os.execv(str(vp), [str(vp)] + sys.argv)
 
-    # ── Krok 3: Konfiguracja pyproject.toml ───────────────────────────────────
-    hdr('3. Konfiguracja serwera')
-    _configure_toml()
-
-    # ── Krok 4: Test połączenia ────────────────────────────────────────────────
-    hdr('4. Test połączenia')
-    _test_connections()
-
-    # ── Krok 5: Uruchomienie ───────────────────────────────────────────────────
-    hdr('5. Uruchomienie')
-    _prompt_start()
+    hdr('4. HF Token');     _configure_env()
+    hdr('5. Konfiguracja'); _configure_toml()
+    hdr('6. Test HF');      _test_hf()
+    hdr('7. Start');        _prompt_start()
 
 
-# ── Step implementations ───────────────────────────────────────────────────────
+def _ensure_python():
+    if _portable_exe():
+        ok(f'Portable Python już istnieje: {_portable_exe()}'); return
+
+    key = _platform_key()
+    fn  = PBS_TARGETS.get(key)
+    if not fn:
+        warn(f'Brak portable Pythona dla {key} — używam systemowego'); return
+
+    url = f'{PBS_BASE}/{PBS_TAG}/{fn}'
+    info(f'Pobieram Python {PBS_VERSION} (~65MB) ...')
+    PYTHON_DIR.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(suffix='.zip' if IS_WINDOWS else '.tar.gz')
+    os.close(fd)
+    try:
+        last=[−1]
+        def prog(c,b,t):
+            if t>0:
+                p=min(100,c*b*100//t)
+                if p!=last[0]: last[0]=p; print(f'\r  {B}Pobieranie... {p}%{RS}',end='',flush=True)
+        urllib.request.urlretrieve(url, tmp, reporthook=prog); print()
+        info('Rozpakowuję ...')
+        if fn.endswith('.tar.gz'):
+            with tarfile.open(tmp,'r:gz') as t: t.extractall(PYTHON_DIR)
+        else:
+            with zipfile.ZipFile(tmp) as z: z.extractall(PYTHON_DIR)
+    finally:
+        try: os.unlink(tmp)
+        except: pass
+
+    exe = _portable_exe()
+    if not exe: err('Nie znaleziono exe po rozpakowaniu'); sys.exit(1)
+    if not IS_WINDOWS: exe.chmod(0o755)
+    ok(f'Portable Python gotowy: {exe}')
+
+
+def _ensure_venv():
+    if VENV_DIR.exists(): ok('.venv już istnieje'); return
+    exe = _portable_exe() or Path(sys.executable)
+    info(f'Tworzę .venv ({exe}) ...')
+    r = subprocess.run([str(exe), '-m', 'venv', str(VENV_DIR)])
+    if r.returncode != 0: err('Błąd tworzenia venv'); sys.exit(1)
+    ok('.venv utworzony')
+
 
 def _install_deps():
-    venv_dir = HERE / '.venv'
-
-    # Stwórz venv jeśli nie istnieje
-    if not venv_dir.exists():
-        info('Tworzę wirtualne środowisko .venv ...')
-        result = subprocess.run(
-            [sys.executable, '-m', 'venv', str(venv_dir)],
-            cwd=HERE
-        )
-        if result.returncode != 0:
-            err('Nie można stworzyć venv')
-            sys.exit(1)
-        ok('.venv utworzony')
+    pip = _venv_pip()
+    if not pip.exists(): err(f'pip nie znaleziony: {pip}'); sys.exit(1)
+    info('Instaluję requirements.txt ...')
+    r = subprocess.run([str(pip), 'install', '-r', str(HERE/'requirements.txt'), '--quiet'])
+    if r.returncode == 0: ok('Zależności zainstalowane')
     else:
-        ok('.venv już istnieje')
-
-    # Użyj pip z venv
-    venv_pip    = venv_dir / 'bin' / 'pip'
-    venv_python = venv_dir / 'bin' / 'python'
-    if not venv_pip.exists():    # Windows
-        venv_pip    = venv_dir / 'Scripts' / 'pip.exe'
-        venv_python = venv_dir / 'Scripts' / 'python.exe'
-
-    info('Instaluję zależności z pyproject.toml ...')
-    result = subprocess.run(
-        [str(venv_pip), 'install', '-r', 'requirements.txt', '--quiet'],
-        cwd=HERE
-    )
-    if result.returncode == 0:
-        ok('Zależności zainstalowane')
-    else:
-        err('Błąd instalacji — sprawdź output powyżej')
-        if not _ask_yn('Kontynuować mimo błędu?'):
-            sys.exit(1)
-
-    # Jeśli nie jesteśmy jeszcze w venv — uruchom ponownie z venv
-    if sys.executable != str(venv_python) and venv_python.exists():
-        info('Restartuję w środowisku venv ...')
-        os.execv(str(venv_python), [str(venv_python)] + sys.argv)
+        err('Błąd instalacji')
+        if not _ask_yn('Kontynuować?'): sys.exit(1)
 
 
 def _configure_env():
     env_path = HERE / '.env'
-    env_vars = _load_env(env_path)
+    env      = _load_env(env_path)
 
-    # HF_TOKEN
-    current_token = env_vars.get('HF_TOKEN', '')
-    if current_token:
-        masked = current_token[:8] + '...' + current_token[-4:]
-        warn(f'HF_TOKEN już ustawiony: {masked}')
-        if not _ask_yn('Zmienić?', default=False):
-            pass
-        else:
-            current_token = ''
-
-    if not current_token:
-        print(f'\n  Wejdź na: {B}https://huggingface.co/settings/tokens{RS}')
-        print(f'  Stwórz token typu {W}Write{RS}')
+    token = env.get('HF_TOKEN','')
+    if token:
+        warn(f'HF_TOKEN już ustawiony: {token[:8]}...{token[-4:]}')
+        if _ask_yn('Zmienić?', default=False): token = ''
+    if not token:
+        print(f'\n  {B}https://huggingface.co/settings/tokens{RS}  → typ: Write')
         token = input('  Wklej HF_TOKEN: ').strip()
-        if token:
-            env_vars['HF_TOKEN'] = token
-            ok('HF_TOKEN zapisany')
-        else:
-            warn('Pominięto — backend nie będzie mógł zapisywać do HF')
+        if token: env['HF_TOKEN'] = token; ok('HF_TOKEN zapisany')
+        else: warn('Pominięto')
 
-    # ADMIN_KEY
-    if not env_vars.get('ADMIN_KEY'):
+    if not env.get('ADMIN_KEY'):
         import secrets
-        admin_key = secrets.token_urlsafe(32)
-        env_vars['ADMIN_KEY'] = admin_key
-        ok(f'ADMIN_KEY wygenerowany: {admin_key[:16]}...')
-        warn('Zapisz ten klucz! Potrzebny do wywołania /admin/merge')
+        key = secrets.token_urlsafe(32)
+        env['ADMIN_KEY'] = key
+        print(f'\n  {W}ADMIN_KEY (zapisz!): {key}{RS}')
+        ok('ADMIN_KEY wygenerowany')
 
-    _save_env(env_path, env_vars)
-    ok(f'.env zapisany: {env_path}')
-
-    # Załaduj do os.environ dla dalszych kroków
-    for k, v in env_vars.items():
-        os.environ.setdefault(k, v)
+    _save_env(env_path, env)
+    for k,v in env.items(): os.environ.setdefault(k,v)
+    ok('.env zapisany')
 
 
 def _configure_toml():
-    toml_path = HERE / 'pyproject.toml'
-    content   = toml_path.read_text(encoding='utf-8')
-
-    # Pokaż aktualne wartości
-    repo_match = re.search(r'repo_id\s*=\s*"([^"]+)"', content)
-    port_match  = re.search(r'port\s*=\s*(\d+)', content)
-    current_repo = repo_match.group(1) if repo_match else 'sets-sto/warp-knowledge'
-    current_port = port_match.group(1) if port_match else '8000'
-
-    info(f'HF repo:  {current_repo}')
-    info(f'Port:     {current_port}')
-
-    if _ask_yn('Zmienić konfigurację?', default=False):
-        new_repo = input(f'  HF repo_id [{current_repo}]: ').strip() or current_repo
-        new_port = input(f'  Port [{current_port}]: ').strip() or current_port
-
-        content = re.sub(r'(repo_id\s*=\s*)"[^"]+"', f'\\1"{new_repo}"', content)
-        content = re.sub(r'(port\s*=\s*)\d+', f'\\g<1>{new_port}', content)
-        toml_path.write_text(content, encoding='utf-8')
-        ok('pyproject.toml zaktualizowany')
-
-        # Zsynchronizuj z main.py (env override i tak wygrywa na Render)
-        os.environ['HF_REPO_ID'] = new_repo
+    path    = HERE / 'pyproject.toml'
+    content = path.read_text()
+    repo    = _read_toml('repo_id') or 'sets-sto/warp-knowledge'
+    port    = _read_toml('port')    or '8000'
+    info(f'HF repo: {repo}')
+    info(f'Port:    {port}')
+    if _ask_yn('Zmienić?', default=False):
+        nr = input(f'  repo_id [{repo}]: ').strip() or repo
+        np_ = input(f'  port [{port}]: ').strip() or port
+        content = re.sub(r'(repo_id\s*=\s*)"[^"]+"', f'\\1"{nr}"', content)
+        content = re.sub(r'(port\s*=\s*)\d+', f'\\g<1>{np_}', content)
+        path.write_text(content); ok('pyproject.toml zaktualizowany')
 
 
-def _test_connections():
-    # Test HF
-    hf_token  = os.environ.get('HF_TOKEN', '')
-    hf_repo   = _read_toml_value('repo_id') or os.environ.get('HF_REPO_ID', 'sets-sto/warp-knowledge')
-
-    if hf_token:
-        info(f'Testuję dostęp do HF repo: {hf_repo} ...')
-        try:
-            from huggingface_hub import HfApi
-            api  = HfApi(token=hf_token)
-            info_obj = api.repo_info(hf_repo, repo_type='dataset')
-            ok(f'HF repo dostępny: {info_obj.id}')
-        except Exception as e:
-            err(f'HF niedostępny: {e}')
-    else:
-        warn('Brak HF_TOKEN — pomijam test HF')
-
-    # Test lokalny (opcjonalny — serwer musi być uruchomiony)
-    info('Testuję lokalny serwer (http://localhost:8000/health) ...')
+def _test_hf():
+    token = os.environ.get('HF_TOKEN','')
+    repo  = _read_toml('repo_id') or 'sets-sto/warp-knowledge'
+    if not token: warn('Brak HF_TOKEN — pomijam'); return
+    info(f'Testuję {repo} ...')
     try:
-        import urllib.request
-        with urllib.request.urlopen('http://localhost:8000/health', timeout=3) as r:
-            import json
-            data = json.loads(r.read())
-            ok(f'Lokalny serwer odpowiada: {data}')
-    except Exception:
-        warn('Lokalny serwer nie odpowiada (normalnie jeśli jeszcze nie uruchomiony)')
+        from huggingface_hub import HfApi
+        info_obj = HfApi(token=token).repo_info(repo, repo_type='dataset')
+        ok(f'HF OK: {info_obj.id}')
+    except Exception as e:
+        err(f'HF błąd: {e}')
 
 
 def _prompt_start():
-    port = _read_toml_value('port') or '8000'
-    print(f'\n  Aby uruchomić serwer lokalnie:')
-    print(f'  {G}uvicorn main:app --host 0.0.0.0 --port {port} --reload{RS}')
-    print(f'\n  Dokumentacja API:')
-    print(f'  {B}http://localhost:{port}/docs{RS}')
-
+    port = _read_toml('port') or '8000'
+    uvi  = _venv_uvicorn()
+    print(f'\n  Start serwera:')
+    print(f'  {G}{uvi} main:app --host 0.0.0.0 --port {port} --reload{RS}')
+    print(f'  Docs: {B}http://localhost:{port}/docs{RS}')
     if _ask_yn('\nUruchomić teraz?', default=False):
-        os.execv(sys.executable, [
-            sys.executable, '-m', 'uvicorn',
-            'main:app',
-            '--host', '0.0.0.0',
-            '--port', port,
-            '--reload'
-        ])
-
-
-# ── Helpers ────────────────────────────────────────────────────────────────────
-
-def _ask_yn(prompt: str, default: bool = True) -> bool:
-    suffix = ' [T/n]' if default else ' [t/N]'
-    ans = input(f'  {prompt}{suffix}: ').strip().lower()
-    if not ans:
-        return default
-    return ans in ('t', 'y', 'tak', 'yes')
-
-
-def _load_env(path: Path) -> dict[str, str]:
-    if not path.exists():
-        return {}
-    result = {}
-    for line in path.read_text(encoding='utf-8').splitlines():
-        line = line.strip()
-        if line and not line.startswith('#') and '=' in line:
-            k, _, v = line.partition('=')
-            result[k.strip()] = v.strip().strip('"').strip("'")
-    return result
-
-
-def _save_env(path: Path, vars: dict[str, str]) -> None:
-    lines = ['# WARP Backend — zmienne środowiskowe', '# NIE commituj tego pliku!\n']
-    for k, v in vars.items():
-        lines.append(f'{k}={v}')
-    path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-
-
-def _read_toml_value(key: str) -> str | None:
-    try:
-        content = (HERE / 'pyproject.toml').read_text(encoding='utf-8')
-        m = re.search(rf'{re.escape(key)}\s*=\s*["\']?([^"\'#\n]+)["\']?', content)
-        return m.group(1).strip() if m else None
-    except Exception:
-        return None
+        os.execv(str(uvi), [str(uvi),'main:app','--host','0.0.0.0','--port',port,'--reload'])
 
 
 if __name__ == '__main__':
