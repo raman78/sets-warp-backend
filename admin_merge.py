@@ -271,7 +271,23 @@ def _print_row(row: dict):
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description='WARP Knowledge Base merger')
+    parser = argparse.ArgumentParser(
+        description='WARP Knowledge Base merger — łączy contributions z HF w knowledge.json',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Przykłady:
+  python admin_merge.py                           # podgląd (dry-run)
+  python admin_merge.py --apply                   # zapisz do HF
+  python admin_merge.py --apply --min 1           # 1 głos wystarczy
+  python admin_merge.py --since 2026-03-01        # tylko od tej daty
+  python admin_merge.py --apply --export k.json   # zapisz lokalnie + HF
+  python admin_merge.py --verbose                 # pokaż wszystkie wpisy
+
+Zmienne środowiskowe (.env):
+  HF_TOKEN    — HF write token (wymagany)
+  HF_REPO_ID  — np. sets-sto/warp-knowledge (domyslny)
+""",
+    )
     parser.add_argument('--apply',   action='store_true',
                         help='Zapisz wynik do HF (domyślnie: dry-run)')
     parser.add_argument('--min',     type=int, default=2, metavar='N',
