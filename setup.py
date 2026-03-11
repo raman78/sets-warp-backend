@@ -89,6 +89,19 @@ def _save_env(path, vars):
     lines += [f'{k}={v}' for k,v in vars.items()]
     path.write_text('\n'.join(lines)+'\n')
 
+def _find_system_python() -> str:
+    """Znajdź systemowego Pythona poza naszym venv."""
+    import shutil
+    # Szukaj w kolejności preferencji
+    for candidate in ['python3', 'python']:
+        p = shutil.which(candidate)
+        if p and str(VENV_DIR) not in p:
+            return p
+    # Fallback: oryginalny Python którym uruchomiono setup.py
+    # (może być w venv, ale to ostatnia deska ratunku)
+    return sys.executable
+
+
 def _read_toml(key):
     try:
         m = re.search(rf'{re.escape(key)}\s*=\s*["\']?([^"\'#\n]+)["\']?',
@@ -134,13 +147,28 @@ def _cleanup_stale():
 def main():
     print(f'\n{W}WARP Knowledge Backend — Konfigurator{RS}\n{"═"*40}')
 
+    # Nawet jeśli jesteśmy w venv — sprawdź czy to właściwa wersja
     if _in_our_venv():
-        ok(f'Uruchomiony w venv (Python {sys.version.split()[0]})')
-        hdr('Konfiguracja HF Token');  _configure_env()
-        hdr('Konfiguracja serwera');   _configure_toml()
-        hdr('Test połączenia');        _test_hf()
-        hdr('Uruchomienie');           _prompt_start()
-        return
+        major, minor = sys.version_info[:2]
+        if (major, minor) == (3, 12):
+            ok(f'Uruchomiony w venv (Python {sys.version.split()[0]})')
+            hdr('Konfiguracja HF Token');  _configure_env()
+            hdr('Konfiguracja serwera');   _configure_toml()
+            hdr('Test połączenia');        _test_hf()
+            hdr('Uruchomienie');           _prompt_start()
+            return
+        else:
+            warn(f'Venv ma Python {major}.{minor} zamiast 3.12 — czyszczę i reinstalluję ...')
+            # Wyskocz z venv przed czyszczeniem — użyj systemowego Pythona
+            import shutil
+            for d in [VENV_DIR, PYTHON_DIR]:
+                if d.exists():
+                    shutil.rmtree(d)
+                    ok(f'Usunięto: {d}')
+            # Restart z systemowym Pythonem
+            system_python = _find_system_python()
+            info(f'Restartuję z systemowym Pythonem: {system_python}')
+            os.execv(system_python, [system_python] + sys.argv)
 
     hdr('0. Sprawdzam środowisko');  _cleanup_stale()
     hdr('1. Portable Python');       _ensure_python()
