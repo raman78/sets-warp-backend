@@ -2,15 +2,16 @@ services:
   - type: web
     name: sets-warp-backend
     runtime: python
+    pythonVersion: "3.12"
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: HF_TOKEN
-        sync: false          # paste your HF write token in Render dashboard
+        sync: false
       - key: HF_REPO_ID
         value: sets-sto/warp-knowledge
       - key: ADMIN_KEY
-        generateValue: true  # Render generates a random secret
+        generateValue: true
       - key: MAX_REQ_PER_IP
         value: "500"
     healthCheckPath: /health
