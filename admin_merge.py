@@ -22,10 +22,59 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 from collections import Counter
 from datetime import datetime, date
 from pathlib import Path
+
+# ── Auto-restart w .venv jeśli potrzeba ───────────────────────────────────────
+
+def _ensure_venv():
+    """
+    W pełni standalone — zero systemowego Pythona, zero systemowego pip.
+
+    1. Jeśli już jesteśmy w lokalnym .venv → OK
+    2. Jeśli .venv istnieje → restart w nim
+    3. Jeśli brak .venv → uruchom setup.py który:
+         - pobiera portable Python 3.12 do .python/
+         - tworzy .venv z tego Pythona
+         - instaluje requirements.txt (w tym huggingface-hub)
+       Następnie restart w gotowym .venv
+    """
+    here     = Path(__file__).resolve().parent
+    is_win   = sys.platform == 'win32'
+    venv_py  = here / ('.venv/Scripts/python.exe' if is_win else '.venv/bin/python')
+    setup_py = here / 'setup.py'
+
+    # 1. Już jesteśmy w naszym .venv
+    if venv_py.exists() and Path(sys.executable).resolve() == venv_py.resolve():
+        return
+
+    # 2. .venv istnieje — restart w nim
+    if venv_py.exists():
+        os.execv(str(venv_py), [str(venv_py)] + sys.argv)
+
+    # 3. Brak .venv — uruchom setup.py (pobierze portable Python, zbuduje venv)
+    if setup_py.exists():
+        print('  → Brak .venv — uruchamiam setup.py (portable Python 3.12) ...')
+        # setup.py jest interaktywny — uruchamiamy go i po zakończeniu
+        # restart w nowo utworzonym .venv
+        ret = subprocess.call([sys.executable, str(setup_py)])
+        if ret != 0:
+            print('ERROR: setup.py nie powiódł się.', file=sys.stderr)
+            sys.exit(1)
+        if venv_py.exists():
+            os.execv(str(venv_py), [str(venv_py)] + sys.argv)
+        else:
+            print('ERROR: setup.py nie utworzył .venv.', file=sys.stderr)
+            sys.exit(1)
+    else:
+        print('ERROR: brak setup.py — uruchom go ręcznie żeby skonfigurować środowisko.',
+              file=sys.stderr)
+        sys.exit(1)
+
+_ensure_venv()
 
 
 # ── Load .env if present ───────────────────────────────────────────────────────
