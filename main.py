@@ -34,6 +34,8 @@ from datetime import datetime, date, timezone
 from pathlib import Path
 from typing import Any
 
+import cv2
+import numpy as np
 from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -139,6 +141,10 @@ async def contribute(req: ContributeRequest, request: Request):
     except Exception as e:
         raise HTTPException(400, f'Invalid crop image: {e}')
 
+    # Validate image content (reject garbage/uniform images)
+    if not is_valid_crop(png_bytes):
+        raise HTTPException(400, 'Crop rejected: image too uniform or invalid')
+
     # Build contribution record
     contrib_id  = hashlib.sha256(
         f'{req.install_id}{req.phash}{req.timestamp}'.encode()
@@ -232,6 +238,25 @@ async def admin_merge(
         return {'ok': True, 'merged': new_entries, 'total': len(merged)}
     else:
         raise HTTPException(503, 'Failed to write knowledge.json to HF')
+
+
+# ── Validation helpers ─────────────────────────────────────────────────────────
+
+def is_valid_crop(png_bytes: bytes) -> bool:
+    """Checks if crop is valid (not garbage/too uniform)."""
+    try:
+        nparr = np.frombuffer(png_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            return False
+
+        # Calculate standard deviation - low means uniform color (empty slot)
+        std_dev = np.std(img)
+        if std_dev < 10: # Threshold for near-uniform images
+            return False
+        return True
+    except Exception:
+        return False
 
 
 # ── HF Dataset helpers ─────────────────────────────────────────────────────────
