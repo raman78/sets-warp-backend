@@ -248,23 +248,39 @@ def train(winner_labels: dict[str, str], sha_source: dict[str, str],
     import random
     from collections import Counter as _Counter
 
-    # ── Collect crops ────────────────────────────────────────────────────────
-    print(f'\nDownloading {len(winner_labels)} crops...')
-    crops, labels = [], []
-    for i, (sha, label) in enumerate(winner_labels.items(), 1):
-        source_iid = sha_source.get(sha)
-        if not source_iid:
-            continue
-        crop_path = _download_crop(source_iid, sha, tmpdir)
-        if crop_path is None:
-            continue
-        img = cv2.imread(str(crop_path))
+    # ── Collect crops (parallel download) ────────────────────────────────────
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    items_to_dl = [
+        (sha, label, sha_source[sha])
+        for sha, label in winner_labels.items()
+        if sha_source.get(sha)
+    ]
+    print(f'\nDownloading {len(items_to_dl)} crops (16 threads)...')
+
+    def _dl(args):
+        sha, label, iid = args
+        path = _download_crop(iid, sha, tmpdir)
+        if path is None:
+            return None
+        img = cv2.imread(str(path))
         if img is None:
-            continue
-        crops.append(cv2.resize(img, (IMG_SIZE, IMG_SIZE)))
-        labels.append(label)
-        if i % 50 == 0:
-            print(f'  {i}/{len(winner_labels)} crops downloaded...')
+            return None
+        return cv2.resize(img, (IMG_SIZE, IMG_SIZE)), label
+
+    crops, labels = [], []
+    done = 0
+    total_dl = len(items_to_dl)
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        futs = {ex.submit(_dl, item): item for item in items_to_dl}
+        for fut in as_completed(futs):
+            done += 1
+            result = fut.result()
+            if result is not None:
+                crops.append(result[0])
+                labels.append(result[1])
+            if done % 100 == 0 or done == total_dl:
+                print(f'  {done}/{total_dl} done, {len(crops)} loaded')
 
     n = len(crops)
     print(f'{n} crops ready.')
