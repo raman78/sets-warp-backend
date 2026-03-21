@@ -41,12 +41,12 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --quiet \
+            "numpy<2" \
             torch==2.2.2+cpu torchvision==0.17.2+cpu \
             --index-url https://download.pytorch.org/whl/cpu
           pip install --quiet \
             opencv-python-headless \
-            huggingface_hub \
-            numpy
+            huggingface_hub
 
       - name: Train and publish model
         env:
