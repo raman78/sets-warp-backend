@@ -6,9 +6,10 @@ Downloads all user-contributed staging crops from sets-sto/sto-icon-dataset,
 applies democratic label voting (1 install_id = 1 vote, majority per crop),
 trains EfficientNet-B0, uploads the model to sets-sto/warp-knowledge.
 
-Run with the sets-warp .venv (has torch, torchvision, cv2, huggingface_hub):
-    /path/to/sets-warp/.venv/bin/python admin_train.py
-    /path/to/sets-warp/.venv/bin/python admin_train.py --train
+Requires torch, torchvision, cv2 — installed in the sets-warp venv, not here.
+Run from the sets-warp directory:
+    .venv/bin/python ../sets-warp-backend/admin_train.py
+    .venv/bin/python ../sets-warp-backend/admin_train.py --train --min 1
 
 Environment variables (.env in this directory):
     HF_TOKEN         — HF write token (write access to both repos)
