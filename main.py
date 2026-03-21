@@ -58,6 +58,10 @@ _knowledge_cache: dict[str, str] = {}
 _knowledge_cache_ts: float = 0.0
 KNOWLEDGE_CACHE_TTL = 300  # seconds
 
+# In-memory model version cache
+_model_version_cache: dict = {}
+_model_version_cache_ts: float = 0.0
+
 app = FastAPI(
     title='WARP Knowledge Backend',
     version='1.0.0',
@@ -101,6 +105,28 @@ class ContributeRequest(BaseModel):
 @app.get('/health')
 async def health():
     return {'status': 'ok', 'repo': HF_REPO_ID}
+
+
+@app.get('/model/version')
+async def get_model_version():
+    """
+    Return metadata for the latest centrally-trained model.
+    Clients compare 'trained_at' with their local model_version.json
+    to decide whether to download an update.
+
+    Format: {"available": true, "version": "abc123", "trained_at": "...", ...}
+            {"available": false}  — no model published yet
+    """
+    global _model_version_cache, _model_version_cache_ts
+
+    now = time.time()
+    if now - _model_version_cache_ts > KNOWLEDGE_CACHE_TTL:
+        _model_version_cache    = _load_model_version_from_hf()
+        _model_version_cache_ts = now
+
+    if not _model_version_cache:
+        return JSONResponse({'available': False})
+    return JSONResponse({'available': True, **_model_version_cache})
 
 
 @app.get('/knowledge')
@@ -178,6 +204,82 @@ async def contribute(req: ContributeRequest, request: Request):
     log.info(f'Contribution accepted: id={contrib_id} item={req.item_name!r}')
 
     return {'ok': True, 'contribution_id': contrib_id}
+
+
+@app.post('/webhooks/hf-dataset')
+async def hf_dataset_webhook(request: Request):
+    """
+    Receives HuggingFace Dataset webhook events (push to sto-icon-dataset).
+    Triggers a Bitbucket Pipeline run to start automatic model training.
+
+    Configure on HF: Dataset repo → Settings → Webhooks
+      URL: https://<your-backend>/webhooks/hf-dataset
+      Events: repo.update
+
+    Bitbucket credentials required in environment:
+      BB_WORKSPACE     — Bitbucket workspace slug
+      BB_REPO_SLUG     — Repository slug (e.g. sets-warp-backend)
+      BB_APP_PASSWORD  — Bitbucket App Password with pipeline:write scope
+      BB_USERNAME      — Bitbucket username
+    """
+    BB_WORKSPACE    = os.environ.get('BB_WORKSPACE', '')
+    BB_REPO_SLUG    = os.environ.get('BB_REPO_SLUG', 'sets-warp-backend')
+    BB_APP_PASSWORD = os.environ.get('BB_APP_PASSWORD', '')
+    BB_USERNAME     = os.environ.get('BB_USERNAME', '')
+
+    if not all([BB_WORKSPACE, BB_APP_PASSWORD, BB_USERNAME]):
+        # Not configured — silently accept the webhook (don't expose config state)
+        log.debug('HF webhook received but BB credentials not configured — skipping trigger')
+        return {'ok': True}
+
+    # Rate-limit: at most one pipeline trigger per hour
+    now = time.time()
+    last_trigger = getattr(hf_dataset_webhook, '_last_trigger', 0)
+    if now - last_trigger < 3600:
+        log.debug(f'HF webhook: pipeline trigger skipped (last trigger {int(now - last_trigger)}s ago)')
+        return {'ok': True, 'triggered': False, 'reason': 'rate_limited'}
+    hf_dataset_webhook._last_trigger = now
+
+    # Trigger Bitbucket Pipeline asynchronously (fire-and-forget)
+    import asyncio
+    asyncio.create_task(_trigger_bb_pipeline(BB_USERNAME, BB_APP_PASSWORD, BB_WORKSPACE, BB_REPO_SLUG))
+    return {'ok': True, 'triggered': True}
+
+
+async def _trigger_bb_pipeline(username: str, password: str, workspace: str, repo: str) -> None:
+    """Fire a Bitbucket Pipelines run for the train-central-model custom pipeline."""
+    import base64
+    import urllib.request
+
+    payload = json.dumps({
+        'target': {
+            'type':     'pipeline_ref_target',
+            'ref_type': 'branch',
+            'ref_name': 'main',
+            'selector': {
+                'type':    'custom',
+                'pattern': 'train-central-model',
+            },
+        }
+    }).encode('utf-8')
+
+    credentials = base64.b64encode(f'{username}:{password}'.encode()).decode()
+    url = f'https://api.bitbucket.org/2.0/repositories/{workspace}/{repo}/pipelines/'
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={
+            'Authorization': f'Basic {credentials}',
+            'Content-Type':  'application/json',
+        },
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+            log.info(f'BB Pipeline triggered: uuid={result.get("uuid")} state={result.get("state", {}).get("name")}')
+    except Exception as e:
+        log.warning(f'BB Pipeline trigger failed: {e}')
 
 
 @app.post('/admin/merge')
@@ -281,6 +383,24 @@ def _hf_upload_files(files: dict[str, bytes]) -> bool:
     except Exception as e:
         log.error(f'HF upload failed: {e}')
         return False
+
+
+def _load_model_version_from_hf() -> dict:
+    """Download models/model_version.json from HF. Returns {} if not published yet."""
+    if not HF_REPO_ID:
+        return {}
+    try:
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(
+            repo_id=HF_REPO_ID,
+            filename='models/model_version.json',
+            repo_type='dataset',
+            token=HF_TOKEN or None,
+        )
+        return json.loads(Path(path).read_text(encoding='utf-8'))
+    except Exception as e:
+        log.debug(f'models/model_version.json not found: {e}')
+        return {}
 
 
 def _load_knowledge_from_hf() -> dict[str, str]:

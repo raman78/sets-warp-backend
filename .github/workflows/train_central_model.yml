@@ -1,0 +1,57 @@
+# .github/workflows/train_central_model.yml
+#
+# Automated WARP Central Model Training — GitHub Actions
+# =======================================================
+# Runs every hour. If no new crops arrived since last training:
+# exits in ~60 seconds (no compute wasted). Otherwise trains
+# EfficientNet-B0 on community crops and publishes to HF.
+#
+# GitHub Actions for PUBLIC repos = unlimited free minutes.
+#
+# SETUP (one-time):
+#   GitHub repo → Settings → Secrets and variables → Actions → New secret:
+#     HF_TOKEN   = <your HF write token>
+#
+# Optional secrets (if HF repos differ from defaults):
+#     HF_DATASET = sets-sto/sto-icon-dataset
+#     HF_REPO_ID = sets-sto/warp-knowledge
+
+name: Train Central Model
+
+on:
+  schedule:
+    - cron: '0 * * * *'   # every hour, on the hour
+  workflow_dispatch:        # allow manual trigger from GitHub UI
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60     # safety cap — training never exceeds 1 h
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'       # cache ~/.cache/pip between runs
+
+      - name: Install dependencies
+        run: |
+          pip install --quiet \
+            torch==2.2.2+cpu torchvision==0.17.2+cpu \
+            --index-url https://download.pytorch.org/whl/cpu
+          pip install --quiet \
+            opencv-python-headless \
+            huggingface_hub \
+            numpy
+
+      - name: Train and publish model
+        env:
+          HF_TOKEN:   ${{ secrets.HF_TOKEN }}
+          HF_DATASET: ${{ secrets.HF_DATASET || 'sets-sto/sto-icon-dataset' }}
+          HF_REPO_ID: ${{ secrets.HF_REPO_ID || 'sets-sto/warp-knowledge' }}
+        run: |
+          python admin_train.py --train --skip-if-unchanged --min 1
