@@ -335,39 +335,50 @@ def train_screen_classifier(
     import torchvision.transforms as T
     import torch.nn.functional as _F
     import random
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import logging as _log_sc
 
-    # ── Collect screenshots ───────────────────────────────────────────────────
-    items_to_dl = [(sha, stype, iid) for sha, (stype, iid) in winner_map.items()]
-    print(f'\nDownloading {len(items_to_dl)} screen type screenshots (8 threads)...')
+    _log_sc.getLogger('httpx').setLevel(_log_sc.WARNING)
 
-    sc_tmp = tmpdir / 'sc_shots'
-    sc_tmp.mkdir(exist_ok=True)
+    from huggingface_hub import snapshot_download as _snap_sc
+    from collections import defaultdict as _dd_sc2
 
-    def _dl(args):
-        sha, stype, iid = args
-        path = _download_screen_shot(iid, stype, sha, sc_tmp)
-        if path is None:
-            return None
-        img = cv2.imread(str(path))
-        if img is None:
-            return None
-        return cv2.resize(img, (SC_IMG_SIZE, SC_IMG_SIZE)), stype
+    # ── Collect screenshots (bulk download per install_id) ────────────────────
+    # Group by install_id so we can snapshot-download entire screen_types folders
+    by_iid_sc: dict[str, list[tuple[str, str]]] = _dd_sc2(list)
+    for sha, (stype, iid) in winner_map.items():
+        by_iid_sc[iid].append((sha, stype))
+
+    snap_sc = tmpdir / 'snap_sc'
+    snap_sc.mkdir(exist_ok=True)
+
+    print(f'\nDownloading screen type screenshots from {len(by_iid_sc)} contributor(s)...')
+    for iid in sorted(by_iid_sc):
+        print(f'  {iid}: {len(by_iid_sc[iid])} screenshot(s)...')
+        try:
+            _snap_sc(
+                repo_id=HF_DATASET,
+                repo_type='dataset',
+                token=HF_TOKEN or None,
+                allow_patterns=[f'staging/{iid}/screen_types/**/*.png'],
+                local_dir=str(snap_sc),
+                ignore_patterns=['*.gitattributes', 'README*', '*.md'],
+            )
+        except Exception as e:
+            print(f'  WARNING: snapshot_download failed for {iid}: {e}')
 
     images, labels = [], []
-    done = 0
-    total_dl = len(items_to_dl)
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        futs = {ex.submit(_dl, item): item for item in items_to_dl}
-        for fut in as_completed(futs):
-            done += 1
-            result = fut.result()
-            if result is not None:
-                images.append(result[0])
-                labels.append(result[1])
-            if done % 50 == 0 or done == total_dl:
-                print(f'  {done}/{total_dl} done, {len(images)} loaded')
+    for iid, items in by_iid_sc.items():
+        for sha, stype in items:
+            p = snap_sc / 'staging' / iid / 'screen_types' / stype / f'{sha}.png'
+            if not p.exists():
+                continue
+            img = cv2.imread(str(p))
+            if img is None:
+                continue
+            images.append(cv2.resize(img, (SC_IMG_SIZE, SC_IMG_SIZE)))
+            labels.append(stype)
 
+    print(f'{len(images)}/{len(winner_map)} screenshots loaded.')
     n = len(images)
     print(f'{n} screenshots ready.')
     if n < SC_MIN_SAMPLES:
@@ -438,18 +449,22 @@ def train_screen_classifier(
     model.classifier[-1] = torch.nn.Linear(in_features, n_classes)
     model = model.to(device)
 
-    # Warm-start: load backbone from previous central screen_classifier if available
+    # Warm-start: load backbone from previous central screen_classifier if available.
+    # Strip classifier keys before loading — strict=False ignores missing/unexpected
+    # keys but still raises on size mismatch (same key, different n_classes shape).
     sc_fine_tuning = False
     if prev_model_pt and prev_model_pt.exists():
         try:
             state = torch.load(str(prev_model_pt), map_location=device)
-            missing, unexpected = model.load_state_dict(state, strict=False)
+            backbone_state = {k: v for k, v in state.items()
+                              if not k.startswith('classifier')}
+            missing, unexpected = model.load_state_dict(backbone_state, strict=False)
             non_head = [k for k in (missing + unexpected) if 'classifier' not in k]
             if not non_head:
                 print('Loaded backbone from previous central screen_classifier — fine-tuning')
                 sc_fine_tuning = True
             else:
-                print(f'Previous screen model loaded with {len(non_head)} unexpected keys')
+                print(f'Previous screen model: {len(non_head)} unexpected backbone keys')
         except Exception as e:
             print(f'Previous screen model load failed ({e}) — using ImageNet weights')
     else:
@@ -593,40 +608,55 @@ def train(winner_labels: dict[str, str], sha_source: dict[str, str],
     import random
     from collections import Counter as _Counter
 
-    # ── Collect crops (parallel download) ────────────────────────────────────
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    # ── Collect crops (bulk download per install_id via snapshot_download) ────
+    # snapshot_download fetches an entire folder in parallel — far fewer HTTP
+    # round-trips than one hf_hub_download call per file.
+    import logging as _logging
+    _logging.getLogger('httpx').setLevel(_logging.WARNING)   # suppress HEAD spam
 
-    items_to_dl = [
-        (sha, label, sha_source[sha])
-        for sha, label in winner_labels.items()
-        if sha_source.get(sha)
-    ]
-    print(f'\nDownloading {len(items_to_dl)} crops (16 threads)...')
+    from huggingface_hub import snapshot_download as _snap
+    from collections import defaultdict as _dd3
 
-    def _dl(args):
-        sha, label, iid = args
-        path = _download_crop(iid, sha, tmpdir)
-        if path is None:
-            return None
-        img = cv2.imread(str(path))
-        if img is None:
-            return None
-        return cv2.resize(img, (IMG_SIZE, IMG_SIZE)), label
+    # Group by install_id so we issue one snapshot call per contributor
+    by_iid: dict[str, list[tuple[str, str]]] = _dd3(list)
+    for sha, label in winner_labels.items():
+        iid = sha_source.get(sha)
+        if iid:
+            by_iid[iid].append((sha, label))
+
+    snap_cache = tmpdir / 'snap'
+    snap_cache.mkdir(exist_ok=True)
+
+    print(f'\nDownloading crops from {len(by_iid)} contributor(s) via snapshot_download...')
+    for iid in sorted(by_iid):
+        n_iid = len(by_iid[iid])
+        print(f'  {iid}: {n_iid} crop(s)...')
+        try:
+            _snap(
+                repo_id=HF_DATASET,
+                repo_type='dataset',
+                token=HF_TOKEN or None,
+                allow_patterns=[f'staging/{iid}/crops/*.png'],
+                local_dir=str(snap_cache),
+                ignore_patterns=['*.gitattributes', 'README*', '*.md'],
+            )
+        except Exception as e:
+            print(f'  WARNING: snapshot_download failed for {iid}: {e}')
 
     crops, labels = [], []
-    done = 0
-    total_dl = len(items_to_dl)
-    with ThreadPoolExecutor(max_workers=16) as ex:
-        futs = {ex.submit(_dl, item): item for item in items_to_dl}
-        for fut in as_completed(futs):
-            done += 1
-            result = fut.result()
-            if result is not None:
-                crops.append(result[0])
-                labels.append(result[1])
-            if done % 100 == 0 or done == total_dl:
-                print(f'  {done}/{total_dl} done, {len(crops)} loaded')
+    for iid, items in by_iid.items():
+        crop_dir = snap_cache / 'staging' / iid / 'crops'
+        for sha, label in items:
+            p = crop_dir / f'{sha}.png'
+            if not p.exists():
+                continue
+            img = cv2.imread(str(p))
+            if img is None:
+                continue
+            crops.append(cv2.resize(img, (IMG_SIZE, IMG_SIZE)))
+            labels.append(label)
 
+    print(f'{len(crops)}/{sum(len(v) for v in by_iid.values())} crops loaded.')
     n = len(crops)
     print(f'{n} crops ready.')
     if n < MIN_SAMPLES:
@@ -697,18 +727,22 @@ def train(winner_labels: dict[str, str], sha_source: dict[str, str],
     model.classifier[1] = torch.nn.Linear(in_features, n_classes)
     model = model.to(device)
 
-    # Warm-start: load backbone from previous central model if available
+    # Warm-start: load backbone from previous central model if available.
+    # Strip classifier keys before loading — strict=False ignores missing/unexpected
+    # keys but still raises on size mismatch (same key, different n_classes shape).
     fine_tuning = False
     if prev_model_pt and prev_model_pt.exists():
         try:
             state = torch.load(str(prev_model_pt), map_location=device)
-            missing, unexpected = model.load_state_dict(state, strict=False)
+            backbone_state = {k: v for k, v in state.items()
+                              if not k.startswith('classifier')}
+            missing, unexpected = model.load_state_dict(backbone_state, strict=False)
             non_head = [k for k in (missing + unexpected) if 'classifier' not in k]
             if not non_head:
                 print('Loaded backbone from previous central model — fine-tuning')
                 fine_tuning = True
             else:
-                print(f'Previous model loaded with {len(non_head)} unexpected keys')
+                print(f'Previous model: {len(non_head)} unexpected backbone keys')
         except Exception as e:
             print(f'Previous model load failed ({e}) — using ImageNet weights')
     else:
