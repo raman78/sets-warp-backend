@@ -2,9 +2,16 @@
 """
 admin_train.py — WARP Central Model Trainer
 ============================================
-Downloads all user-contributed staging crops from sets-sto/sto-icon-dataset,
-applies democratic label voting (1 install_id = 1 vote, majority per crop),
-trains EfficientNet-B0, uploads the model to sets-sto/warp-knowledge.
+Trains two models from community-contributed data:
+
+1. icon_classifier (EfficientNet-B0) — from confirmed icon crops
+   staging/<install_id>/crops/<sha>.png  +  annotations.jsonl
+
+2. screen_classifier (MobileNetV3-Small) — from confirmed screen type screenshots
+   staging/<install_id>/screen_types/<TYPE>/<sha>.png
+
+Democratic voting: 1 install_id = 1 vote per sha, majority label wins.
+Both models uploaded to sets-sto/warp-knowledge/models/.
 
 Requires torch, torchvision, cv2 — installed in the sets-warp venv, not here.
 Run from the sets-warp directory:
@@ -64,6 +71,18 @@ PATIENCE       = 5
 FOCAL_GAMMA    = 2.0
 MIN_SAMPLES    = 5   # require at least 5 total crops to bother training
 
+# Screen classifier hyper-parameters (MobileNetV3-Small)
+SC_IMG_SIZE   = 224
+SC_BATCH_SIZE = 8
+SC_MAX_EPOCHS = 40
+SC_LR         = 3e-4
+SC_PATIENCE   = 8
+SC_MIN_SAMPLES = 7  # at least 7 screenshots total to bother training
+
+SCREEN_TYPES = [
+    'SPACE_EQ', 'GROUND_EQ', 'TRAITS',
+    'BOFFS', 'SPECIALIZATIONS', 'SPACE_MIXED', 'GROUND_MIXED',
+]
 
 # ── HF helpers ────────────────────────────────────────────────────────────────
 
@@ -135,8 +154,10 @@ def _download_crop(install_id: str, sha: str, dest_dir: Path) -> Path | None:
 
 
 def _upload_model(models_dir: Path, n_classes: int, val_acc: float,
-                  n_samples: int, n_users: int) -> bool:
-    """Upload model files to sets-sto/warp-knowledge under models/."""
+                  n_samples: int, n_users: int,
+                  sc_val_acc: float | None = None,
+                  sc_n_samples: int = 0) -> bool:
+    """Upload icon + screen model files to sets-sto/warp-knowledge under models/."""
     from huggingface_hub import HfApi, CommitOperationAdd
     api = HfApi(token=HF_TOKEN)
 
@@ -145,10 +166,10 @@ def _upload_model(models_dir: Path, n_classes: int, val_acc: float,
     meta_path   = models_dir / 'icon_classifier_meta.json'
 
     if not pt_path.exists():
-        log.error('Model file not found — nothing to upload')
+        log.error('icon_classifier.pt not found — nothing to upload')
         return False
 
-    # Compute version hash (sha256 of model file, first 16 hex chars)
+    # Compute version hash (sha256 of icon model file, first 16 hex chars)
     sha = hashlib.sha256(pt_path.read_bytes()).hexdigest()[:16]
     trained_at = datetime.now(UTC).isoformat() + 'Z'
 
@@ -160,6 +181,11 @@ def _upload_model(models_dir: Path, n_classes: int, val_acc: float,
         'n_samples':  n_samples,
         'n_users':    n_users,
     }
+    if sc_val_acc is not None:
+        version_data['screen_trained_at'] = trained_at
+        version_data['screen_val_acc']    = round(sc_val_acc, 4)
+        version_data['screen_n_samples']  = sc_n_samples
+
     version_path = models_dir / 'model_version.json'
     version_path.write_text(json.dumps(version_data, indent=2), encoding='utf-8')
 
@@ -175,22 +201,287 @@ def _upload_model(models_dir: Path, n_classes: int, val_acc: float,
             path_in_repo='models/training_manifest.json',
             path_or_fileobj=str(manifest_path),
         ))
+    # Include screen classifier if trained
+    sc_pt     = models_dir / 'screen_classifier.pt'
+    sc_labels = models_dir / 'screen_classifier_labels.json'
+    if sc_pt.exists():
+        ops.append(CommitOperationAdd(path_in_repo='models/screen_classifier.pt',          path_or_fileobj=str(sc_pt)))
+    if sc_labels.exists():
+        ops.append(CommitOperationAdd(path_in_repo='models/screen_classifier_labels.json', path_or_fileobj=str(sc_labels)))
 
+    msg = (f'admin_train: icon {n_classes}cls val={val_acc:.1%} ({n_samples}s/{n_users}u)'
+           + (f'; screen {len(set(version_data.get("screen_n_samples", 0)))}s val={sc_val_acc:.1%}'
+              if sc_val_acc is not None else ''))
     try:
         api.create_commit(
             repo_id=HF_REPO_ID,
             repo_type='dataset',
             operations=ops,
-            commit_message=(
-                f'admin_train: {n_classes} classes, val_acc={val_acc:.1%}, '
-                f'{n_samples} samples from {n_users} users ({trained_at[:10]})'
-            ),
+            commit_message=f'admin_train: icon {n_classes}cls val={val_acc:.1%}'
+                           + (f', screen val={sc_val_acc:.1%}' if sc_val_acc is not None else '')
+                           + f' ({trained_at[:10]})',
         )
         log.info(f'Model uploaded to {HF_REPO_ID}: version={sha}, val_acc={val_acc:.1%}')
         return True
     except Exception as e:
         log.error(f'Upload failed: {e}')
         return False
+
+
+# ── Screen classifier helpers ─────────────────────────────────────────────────
+
+def _list_screen_type_files(folders: list[str]) -> list[tuple[str, str, str]]:
+    """
+    Return list of (install_id, stype, sha) for all screen type PNGs in staging.
+    Path format: staging/<install_id>/screen_types/<stype>/<sha>.png
+    """
+    from huggingface_hub import HfApi
+    api   = HfApi(token=HF_TOKEN)
+    files = list(api.list_repo_files(HF_DATASET, repo_type='dataset'))
+    result = []
+    for f in files:
+        # staging/<install_id>/screen_types/<stype>/<sha>.png
+        parts = f.split('/')
+        if len(parts) == 5 and parts[0] == 'staging' and parts[2] == 'screen_types' and f.endswith('.png'):
+            install_id = parts[1]
+            stype      = parts[3]
+            sha        = parts[4][:-4]  # strip .png
+            result.append((install_id, stype, sha))
+    return result
+
+
+def _download_screen_shot(install_id: str, stype: str, sha: str, dest_dir: Path) -> Path | None:
+    """Download staging/<install_id>/screen_types/<stype>/<sha>.png to dest_dir."""
+    from huggingface_hub import hf_hub_download
+    dest = dest_dir / f'{sha}.png'
+    if dest.exists():
+        return dest
+    try:
+        local = hf_hub_download(
+            HF_DATASET,
+            f'staging/{install_id}/screen_types/{stype}/{sha}.png',
+            repo_type='dataset',
+            token=HF_TOKEN,
+        )
+        import shutil
+        shutil.copy2(local, dest)
+        return dest
+    except Exception as e:
+        log.debug(f'Screen shot {sha} from {install_id}/{stype} missing: {e}')
+        return None
+
+
+def collect_screen_type_votes(all_files: list[tuple[str, str, str]]) -> tuple[dict[str, tuple[str, str]], int]:
+    """
+    Apply democratic voting to screen type screenshots.
+
+    Returns:
+        winner_map:  {sha -> (winning_stype, install_id_that_uploaded_it)}
+        n_users:     number of install_ids that contributed at least one screenshot
+    """
+    # sha -> {install_id -> stype}  (each install_id casts 1 vote per sha)
+    sha_votes: dict[str, dict[str, str]] = defaultdict(dict)
+    sha_source: dict[str, str] = {}
+
+    for install_id, stype, sha in all_files:
+        if stype not in SCREEN_TYPES:
+            continue
+        sha_votes[sha][install_id] = stype
+        sha_source.setdefault(sha, install_id)
+
+    n_users = len({iid for iid, _, _ in all_files})
+
+    winner_map: dict[str, tuple[str, str]] = {}
+    for sha, votes in sha_votes.items():
+        label_counts = Counter(votes.values())
+        winner, _ = label_counts.most_common(1)[0]
+        winner_map[sha] = (winner, sha_source[sha])
+
+    return winner_map, n_users
+
+
+def train_screen_classifier(
+    winner_map: dict[str, tuple[str, str]],
+    models_dir: Path,
+    tmpdir: Path,
+) -> tuple[float, int]:
+    """
+    Download winning screenshots, fine-tune MobileNetV3-Small, save to models_dir.
+    Returns (best_val_acc, n_samples_used).
+    """
+    import cv2
+    import torch
+    import torchvision.models as tv_models
+    import torchvision.transforms as T
+    import torch.nn.functional as _F
+    import random
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # ── Collect screenshots ───────────────────────────────────────────────────
+    items_to_dl = [(sha, stype, iid) for sha, (stype, iid) in winner_map.items()]
+    print(f'\nDownloading {len(items_to_dl)} screen type screenshots (8 threads)...')
+
+    sc_tmp = tmpdir / 'sc_shots'
+    sc_tmp.mkdir(exist_ok=True)
+
+    def _dl(args):
+        sha, stype, iid = args
+        path = _download_screen_shot(iid, stype, sha, sc_tmp)
+        if path is None:
+            return None
+        img = cv2.imread(str(path))
+        if img is None:
+            return None
+        return cv2.resize(img, (SC_IMG_SIZE, SC_IMG_SIZE)), stype
+
+    images, labels = [], []
+    done = 0
+    total_dl = len(items_to_dl)
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futs = {ex.submit(_dl, item): item for item in items_to_dl}
+        for fut in as_completed(futs):
+            done += 1
+            result = fut.result()
+            if result is not None:
+                images.append(result[0])
+                labels.append(result[1])
+            if done % 50 == 0 or done == total_dl:
+                print(f'  {done}/{total_dl} done, {len(images)} loaded')
+
+    n = len(images)
+    print(f'{n} screenshots ready.')
+    if n < SC_MIN_SAMPLES:
+        raise RuntimeError(
+            f'Only {n} screen type screenshots (need {SC_MIN_SAMPLES}). '
+            'Contribute more confirmed screen type labels first.'
+        )
+
+    # ── Label map ─────────────────────────────────────────────────────────────
+    unique_labels = sorted(set(labels))
+    label_to_idx  = {l: i for i, l in enumerate(unique_labels)}
+    idx_to_label  = {i: l for l, i in label_to_idx.items()}
+    n_classes     = len(unique_labels)
+    y             = [label_to_idx[l] for l in labels]
+
+    print(f'{n_classes} screen type classes: {unique_labels}')
+
+    # ── Dataset ───────────────────────────────────────────────────────────────
+    transform_train = T.Compose([
+        T.ToPILImage(),
+        T.RandomResizedCrop(SC_IMG_SIZE, scale=(0.85, 1.0)),
+        T.ColorJitter(brightness=0.15, contrast=0.15),
+        T.ToTensor(),
+        T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ])
+    transform_val = T.Compose([
+        T.ToPILImage(),
+        T.Resize((SC_IMG_SIZE, SC_IMG_SIZE)),
+        T.ToTensor(),
+        T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ])
+
+    class ScreenDataset(torch.utils.data.Dataset):
+        def __init__(self, imgs, lbls, tf):
+            self.imgs, self.lbls, self.tf = imgs, lbls, tf
+        def __len__(self):    return len(self.imgs)
+        def __getitem__(self, i):
+            return self.tf(cv2.cvtColor(self.imgs[i], cv2.COLOR_BGR2RGB)), self.lbls[i]
+
+    idx_all = list(range(n))
+    random.shuffle(idx_all)
+    split     = max(1, int(n * 0.8))
+    train_idx = idx_all[:split]
+    val_idx   = idx_all[split:] or idx_all[:1]
+
+    ds_train = ScreenDataset([images[i] for i in train_idx], [y[i] for i in train_idx], transform_train)
+    ds_val   = ScreenDataset([images[i] for i in val_idx],   [y[i] for i in val_idx],   transform_val)
+    dl_train = torch.utils.data.DataLoader(ds_train, batch_size=SC_BATCH_SIZE, shuffle=True,  num_workers=0)
+    dl_val   = torch.utils.data.DataLoader(ds_val,   batch_size=SC_BATCH_SIZE, shuffle=False, num_workers=0)
+
+    # ── Model ─────────────────────────────────────────────────────────────────
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f'Training screen_classifier on {device}...')
+
+    model = tv_models.mobilenet_v3_small(weights=tv_models.MobileNet_V3_Small_Weights.IMAGENET1K_V1)
+    in_features = model.classifier[-1].in_features
+    model.classifier[-1] = torch.nn.Linear(in_features, n_classes)
+    model = model.to(device)
+
+    if n < 30:
+        for p in model.features.parameters():
+            p.requires_grad = False
+
+    optimizer = torch.optim.AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()), lr=SC_LR)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=SC_MAX_EPOCHS)
+
+    counts = Counter(y)
+    _cw = torch.tensor(
+        [1.0 / max(counts[i], 1) for i in range(n_classes)],
+        dtype=torch.float32, device=device)
+    _cw = _cw / _cw.sum() * n_classes
+
+    class _FocalLoss(torch.nn.Module):
+        def forward(self, logits, targets):
+            ce = _F.cross_entropy(logits, targets, weight=_cw, reduction='none')
+            pt = torch.exp(-ce)
+            return ((1.0 - pt) ** FOCAL_GAMMA * ce).mean()
+
+    criterion = _FocalLoss().to(device)
+
+    # ── Training loop ─────────────────────────────────────────────────────────
+    best_val_acc   = 0.0
+    best_state     = None
+    patience_count = 0
+
+    for epoch in range(SC_MAX_EPOCHS):
+        if epoch == SC_MAX_EPOCHS // 2 and n < 30:
+            for p in model.features.parameters():
+                p.requires_grad = True
+            optimizer = torch.optim.AdamW(model.parameters(), lr=SC_LR * 0.1)
+
+        model.train()
+        for xb, yb in dl_train:
+            xb, yb = xb.to(device), yb.to(device)
+            optimizer.zero_grad()
+            criterion(model(xb), yb).backward()
+            optimizer.step()
+        scheduler.step()
+
+        model.eval()
+        correct = total = 0
+        with torch.no_grad():
+            for xb, yb in dl_val:
+                xb, yb = xb.to(device), yb.to(device)
+                preds   = model(xb).argmax(dim=1)
+                correct += (preds == yb).sum().item()
+                total   += yb.size(0)
+        val_acc = correct / total if total > 0 else 0.0
+
+        print(f'  Epoch {epoch+1:2d}/{SC_MAX_EPOCHS}  val_acc={val_acc:.1%}  best={best_val_acc:.1%}')
+
+        if val_acc > best_val_acc:
+            best_val_acc   = val_acc
+            best_state     = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            patience_count = 0
+        else:
+            patience_count += 1
+            if patience_count >= SC_PATIENCE:
+                print(f'  Early stop at epoch {epoch+1}.')
+                break
+
+    if best_state:
+        model.load_state_dict(best_state)
+
+    # ── Save ──────────────────────────────────────────────────────────────────
+    models_dir.mkdir(parents=True, exist_ok=True)
+    model.eval().cpu()
+    torch.save(model.state_dict(), str(models_dir / 'screen_classifier.pt'))
+    with open(models_dir / 'screen_classifier_labels.json', 'w', encoding='utf-8') as f:
+        json.dump(idx_to_label, f, ensure_ascii=False, indent=2)
+
+    print(f'\nscreen_classifier saved — {n_classes} classes, val_acc={best_val_acc:.1%}')
+    return best_val_acc, n
 
 
 # ── Democratic voting ─────────────────────────────────────────────────────────
@@ -557,17 +848,38 @@ Environment (.env or env vars in CI):
         tmpdir     = Path(tmp)
         models_dir = tmpdir / 'models'
 
-        print('\nTraining EfficientNet-B0...')
+        print('\nTraining EfficientNet-B0 (icon classifier)...')
         val_acc, n_samples = train(winner_labels, sha_source, models_dir, tmpdir)
+
+        # Train screen_classifier if data available
+        sc_val_acc: float | None = None
+        sc_n_samples = 0
+        print('\nScanning screen type staging data...')
+        try:
+            sc_files = _list_screen_type_files(folders)
+            print(f'Found {len(sc_files)} screen type screenshot(s) across all users.')
+            if sc_files:
+                sc_winner_map, sc_n_users = collect_screen_type_votes(sc_files)
+                sc_counts = Counter(stype for stype, _ in sc_winner_map.values())
+                print(f'{len(sc_winner_map)} unique screenshots, {len(sc_counts)} classes: '
+                      + ', '.join(f'{k}={v}' for k, v in sorted(sc_counts.items())))
+                if len(sc_winner_map) >= SC_MIN_SAMPLES:
+                    print(f'\nTraining MobileNetV3-Small (screen classifier, {sc_n_users} user(s))...')
+                    sc_val_acc, sc_n_samples = train_screen_classifier(sc_winner_map, models_dir, tmpdir)
+                else:
+                    print(f'Not enough screen type data ({len(sc_winner_map)} < {SC_MIN_SAMPLES}) — skipping screen classifier training.')
+        except Exception as e:
+            print(f'WARNING: screen classifier training failed: {e}', file=sys.stderr)
 
         # 4. Upload
         # Save training manifest (so next run can skip if nothing changed)
         _save_training_manifest(set(winner_labels.keys()), models_dir)
 
-        print('\nUploading model to HF...')
-        ok = _upload_model(models_dir, len(label_counts), val_acc, n_samples, n_users)
+        print('\nUploading models to HF...')
+        ok = _upload_model(models_dir, len(label_counts), val_acc, n_samples, n_users,
+                           sc_val_acc=sc_val_acc, sc_n_samples=sc_n_samples)
         if ok:
-            print(f'\nDone — model published to {HF_REPO_ID}/models/')
+            print(f'\nDone — models published to {HF_REPO_ID}/models/')
         else:
             print('\nERROR — upload failed.', file=sys.stderr)
             sys.exit(1)
