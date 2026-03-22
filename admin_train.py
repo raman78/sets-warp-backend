@@ -70,14 +70,17 @@ LR             = 3e-4
 PATIENCE       = 5
 FOCAL_GAMMA    = 2.0
 MIN_SAMPLES    = 5   # require at least 5 total crops to bother training
+MIN_NEW_CROPS  = 10  # minimum new crops since last training to bother retraining
 
 # Screen classifier hyper-parameters (MobileNetV3-Small)
-SC_IMG_SIZE   = 224
-SC_BATCH_SIZE = 8
-SC_MAX_EPOCHS = 40
-SC_LR         = 3e-4
-SC_PATIENCE   = 8
-SC_MIN_SAMPLES = 7  # at least 7 screenshots total to bother training
+SC_IMG_SIZE    = 224
+SC_BATCH_SIZE  = 8
+SC_MAX_EPOCHS  = 40
+SC_LR          = 3e-4
+SC_PATIENCE    = 8
+SC_MIN_SAMPLES = 7   # at least 7 screenshots total to bother training
+SC_MIN_KEEP    = 30  # per screen-type: below this count keep all samples
+SC_MAX_KEEP    = 150 # per screen-type: above SC_MIN_KEEP cap to this many
 
 SCREEN_TYPES = [
     'SPACE_EQ', 'GROUND_EQ', 'TRAITS',
@@ -297,13 +300,30 @@ def collect_screen_type_votes(all_files: list[tuple[str, str, str]]) -> tuple[di
         winner, _ = label_counts.most_common(1)[0]
         winner_map[sha] = (winner, sha_source[sha])
 
-    return winner_map, n_users
+    # Per-class cap: if a screen type has >= SC_MIN_KEEP samples, keep only
+    # SC_MAX_KEEP (random selection — avoids bloat for stable UI screens).
+    import random as _random
+    by_class: dict[str, list[str]] = defaultdict(list)
+    for sha, (stype, _) in winner_map.items():
+        by_class[stype].append(sha)
+
+    capped: dict[str, tuple[str, str]] = {}
+    for stype, shas in by_class.items():
+        if len(shas) >= SC_MIN_KEEP and len(shas) > SC_MAX_KEEP:
+            _random.shuffle(shas)
+            shas = shas[:SC_MAX_KEEP]
+            print(f'  Screen type {stype}: capped to {SC_MAX_KEEP} of {len(by_class[stype])} samples')
+        for sha in shas:
+            capped[sha] = winner_map[sha]
+
+    return capped, n_users
 
 
 def train_screen_classifier(
     winner_map: dict[str, tuple[str, str]],
     models_dir: Path,
     tmpdir: Path,
+    prev_model_pt: Path | None = None,
 ) -> tuple[float, int]:
     """
     Download winning screenshots, fine-tune MobileNetV3-Small, save to models_dir.
@@ -387,14 +407,25 @@ def train_screen_classifier(
         def __getitem__(self, i):
             return self.tf(cv2.cvtColor(self.imgs[i], cv2.COLOR_BGR2RGB)), self.lbls[i]
 
-    idx_all = list(range(n))
-    random.shuffle(idx_all)
-    split     = max(1, int(n * 0.8))
-    train_idx = idx_all[:split]
-    val_idx   = idx_all[split:] or idx_all[:1]
+    # Stratified split — classes with 1 sample stay in train only
+    from collections import defaultdict as _dd_sc
+    by_cls_sc: dict[int, list[int]] = _dd_sc(list)
+    for i, lbl in enumerate(y):
+        by_cls_sc[lbl].append(i)
+    train_idx_sc: list[int] = []
+    val_idx_sc:   list[int] = []
+    for lbl, idxs in by_cls_sc.items():
+        random.shuffle(idxs)
+        if len(idxs) >= 2:
+            val_idx_sc.append(idxs[0])
+            train_idx_sc.extend(idxs[1:])
+        else:
+            train_idx_sc.extend(idxs)
+    random.shuffle(train_idx_sc)
+    val_idx_sc = val_idx_sc or train_idx_sc[:1]
 
-    ds_train = ScreenDataset([images[i] for i in train_idx], [y[i] for i in train_idx], transform_train)
-    ds_val   = ScreenDataset([images[i] for i in val_idx],   [y[i] for i in val_idx],   transform_val)
+    ds_train = ScreenDataset([images[i] for i in train_idx_sc], [y[i] for i in train_idx_sc], transform_train)
+    ds_val   = ScreenDataset([images[i] for i in val_idx_sc],   [y[i] for i in val_idx_sc],   transform_val)
     dl_train = torch.utils.data.DataLoader(ds_train, batch_size=SC_BATCH_SIZE, shuffle=True,  num_workers=0)
     dl_val   = torch.utils.data.DataLoader(ds_val,   batch_size=SC_BATCH_SIZE, shuffle=False, num_workers=0)
 
@@ -407,12 +438,30 @@ def train_screen_classifier(
     model.classifier[-1] = torch.nn.Linear(in_features, n_classes)
     model = model.to(device)
 
+    # Warm-start: load backbone from previous central screen_classifier if available
+    sc_fine_tuning = False
+    if prev_model_pt and prev_model_pt.exists():
+        try:
+            state = torch.load(str(prev_model_pt), map_location=device)
+            missing, unexpected = model.load_state_dict(state, strict=False)
+            non_head = [k for k in (missing + unexpected) if 'classifier' not in k]
+            if not non_head:
+                print('Loaded backbone from previous central screen_classifier — fine-tuning')
+                sc_fine_tuning = True
+            else:
+                print(f'Previous screen model loaded with {len(non_head)} unexpected keys')
+        except Exception as e:
+            print(f'Previous screen model load failed ({e}) — using ImageNet weights')
+    else:
+        print('No previous central screen_classifier — training from ImageNet weights')
+
     if n < 30:
         for p in model.features.parameters():
             p.requires_grad = False
 
+    effective_sc_lr = SC_LR * 0.3 if sc_fine_tuning else SC_LR
     optimizer = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()), lr=SC_LR)
+        filter(lambda p: p.requires_grad, model.parameters()), lr=effective_sc_lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=SC_MAX_EPOCHS)
 
     counts = Counter(y)
@@ -526,9 +575,13 @@ def collect_votes(staging_folders: list[str]) -> tuple[dict[str, str], dict[str,
 # ── Training ──────────────────────────────────────────────────────────────────
 
 def train(winner_labels: dict[str, str], sha_source: dict[str, str],
-          models_dir: Path, tmpdir: Path) -> tuple[float, int]:
+          models_dir: Path, tmpdir: Path,
+          prev_model_pt: Path | None = None) -> tuple[float, int]:
     """
     Download winning crops, train EfficientNet-B0, save model to models_dir.
+
+    prev_model_pt: path to a previously-trained icon_classifier.pt — its
+    backbone weights are loaded (strict=False) for warm-start fine-tuning.
 
     Returns (best_val_acc, n_samples_used).
     """
@@ -613,11 +666,22 @@ def train(winner_labels: dict[str, str], sha_source: dict[str, str],
         def __getitem__(self, i):
             return self.tf(cv2.cvtColor(self.crops[i], cv2.COLOR_BGR2RGB)), self.labels[i]
 
-    idx_all = list(range(n))
-    random.shuffle(idx_all)
-    split      = max(1, int(n * 0.8))
-    train_idx  = idx_all[:split]
-    val_idx    = idx_all[split:] or idx_all[:1]
+    # Stratified split — classes with 1 sample stay in train only
+    from collections import defaultdict as _dd2
+    by_cls: dict[int, list[int]] = _dd2(list)
+    for i, lbl in enumerate(y):
+        by_cls[lbl].append(i)
+    train_idx: list[int] = []
+    val_idx:   list[int] = []
+    for lbl, idxs in by_cls.items():
+        random.shuffle(idxs)
+        if len(idxs) >= 2:
+            val_idx.append(idxs[0])
+            train_idx.extend(idxs[1:])
+        else:
+            train_idx.extend(idxs)
+    random.shuffle(train_idx)
+    val_idx = val_idx or train_idx[:1]
 
     ds_train = CropDataset([crops[i] for i in train_idx], [y[i] for i in train_idx], transform_train)
     ds_val   = CropDataset([crops[i] for i in val_idx],   [y[i] for i in val_idx],   transform_val)
@@ -633,12 +697,30 @@ def train(winner_labels: dict[str, str], sha_source: dict[str, str],
     model.classifier[1] = torch.nn.Linear(in_features, n_classes)
     model = model.to(device)
 
+    # Warm-start: load backbone from previous central model if available
+    fine_tuning = False
+    if prev_model_pt and prev_model_pt.exists():
+        try:
+            state = torch.load(str(prev_model_pt), map_location=device)
+            missing, unexpected = model.load_state_dict(state, strict=False)
+            non_head = [k for k in (missing + unexpected) if 'classifier' not in k]
+            if not non_head:
+                print('Loaded backbone from previous central model — fine-tuning')
+                fine_tuning = True
+            else:
+                print(f'Previous model loaded with {len(non_head)} unexpected keys')
+        except Exception as e:
+            print(f'Previous model load failed ({e}) — using ImageNet weights')
+    else:
+        print('No previous central model — training from ImageNet weights')
+
     if n < 50:
         for p in model.features.parameters():
             p.requires_grad = False
 
+    effective_lr = LR * 0.3 if fine_tuning else LR
     optimizer = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()), lr=LR)
+        filter(lambda p: p.requires_grad, model.parameters()), lr=effective_lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=MAX_EPOCHS)
 
     counts = _Counter(y)
@@ -796,7 +878,7 @@ Environment (.env or env vars in CI):
         print('No valid annotations found — nothing to do.')
         return
 
-    # 2b. Skip-if-unchanged check (fast path before downloading crops)
+    # 2b. Skip-if-unchanged / MIN_NEW_CROPS check (fast path before downloading)
     if args.skip_if_unchanged and args.train:
         current_shas = set(winner_labels.keys())
         last_shas    = _load_training_manifest()
@@ -804,6 +886,9 @@ Environment (.env or env vars in CI):
             print(f'\nNo new crops since last training ({len(current_shas)} crops unchanged) — skipping.')
             return
         new_count = len(current_shas - last_shas)
+        if last_shas and new_count < MIN_NEW_CROPS:
+            print(f'\nOnly {new_count} new crop(s) (threshold: {MIN_NEW_CROPS}) — skipping.')
+            return
         print(f'{new_count} new crop(s) since last training — proceeding.')
 
     # Apply min-votes filter
@@ -848,8 +933,33 @@ Environment (.env or env vars in CI):
         tmpdir     = Path(tmp)
         models_dir = tmpdir / 'models'
 
+        # Download previous central models for warm-start fine-tuning
+        from huggingface_hub import hf_hub_download as _hf_dl
+        import shutil as _shutil
+
+        prev_icon_pt = tmpdir / 'prev_icon_classifier.pt'
+        try:
+            _local = _hf_dl(HF_REPO_ID, 'models/icon_classifier.pt',
+                             repo_type='dataset', token=HF_TOKEN or None)
+            _shutil.copy2(_local, prev_icon_pt)
+            print('Previous icon_classifier.pt downloaded for fine-tuning.')
+        except Exception as _e:
+            print(f'No previous icon_classifier.pt ({_e}) — will train from ImageNet.')
+            prev_icon_pt = None
+
+        prev_sc_pt = tmpdir / 'prev_screen_classifier.pt'
+        try:
+            _local = _hf_dl(HF_REPO_ID, 'models/screen_classifier.pt',
+                             repo_type='dataset', token=HF_TOKEN or None)
+            _shutil.copy2(_local, prev_sc_pt)
+            print('Previous screen_classifier.pt downloaded for fine-tuning.')
+        except Exception as _e:
+            print(f'No previous screen_classifier.pt ({_e}) — will train from ImageNet.')
+            prev_sc_pt = None
+
         print('\nTraining EfficientNet-B0 (icon classifier)...')
-        val_acc, n_samples = train(winner_labels, sha_source, models_dir, tmpdir)
+        val_acc, n_samples = train(winner_labels, sha_source, models_dir, tmpdir,
+                                   prev_model_pt=prev_icon_pt)
 
         # Train screen_classifier if data available
         sc_val_acc: float | None = None
@@ -865,7 +975,8 @@ Environment (.env or env vars in CI):
                       + ', '.join(f'{k}={v}' for k, v in sorted(sc_counts.items())))
                 if len(sc_winner_map) >= SC_MIN_SAMPLES:
                     print(f'\nTraining MobileNetV3-Small (screen classifier, {sc_n_users} user(s))...')
-                    sc_val_acc, sc_n_samples = train_screen_classifier(sc_winner_map, models_dir, tmpdir)
+                    sc_val_acc, sc_n_samples = train_screen_classifier(
+                        sc_winner_map, models_dir, tmpdir, prev_model_pt=prev_sc_pt)
                 else:
                     print(f'Not enough screen type data ({len(sc_winner_map)} < {SC_MIN_SAMPLES}) — skipping screen classifier training.')
         except Exception as e:
