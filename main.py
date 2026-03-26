@@ -13,6 +13,7 @@
 # Storage:
 #   Hugging Face Dataset:  <HF_REPO_ID>  (set via env var)
 #     contributions/YYYY-MM-DD/<uuid>.json  — raw contributions (pending review)
+#     contributions/YYYY-MM-DD/<uuid>.png   — crop image
 #     knowledge.json                        — merged, approved knowledge base
 #
 # Environment variables (set in Render/Railway dashboard):
@@ -113,9 +114,6 @@ async def get_model_version():
     Return metadata for the latest centrally-trained model.
     Clients compare 'trained_at' with their local model_version.json
     to decide whether to download an update.
-
-    Format: {"available": true, "version": "abc123", "trained_at": "...", ...}
-            {"available": false}  — no model published yet
     """
     global _model_version_cache, _model_version_cache_ts
 
@@ -133,7 +131,6 @@ async def get_model_version():
 async def get_knowledge():
     """
     Return the merged community knowledge base.
-    Format: {"knowledge": {"<phash_hex>": "<item_name>", ...}}
     """
     global _knowledge_cache, _knowledge_cache_ts
 
@@ -188,14 +185,14 @@ async def contribute(req: ContributeRequest, request: Request):
         'ip_hash':         hashlib.sha256(client_ip.encode()).hexdigest()[:8],
     }
 
-    # Store PNG and metadata to HF
+    # Store PNG and metadata to HF using atomic commit
     today    = date.today().isoformat()
     hf_path  = f'contributions/{today}/{contrib_id}'
 
     success = _hf_upload_files({
         f'{hf_path}.json':  json.dumps(record, ensure_ascii=False, indent=2).encode('utf-8'),
         f'{hf_path}.png':   png_bytes,
-    })
+    }, message=f'WARP contribution: {req.item_name}')
 
     if not success:
         raise HTTPException(503, 'Storage unavailable, please try later')
@@ -209,18 +206,7 @@ async def contribute(req: ContributeRequest, request: Request):
 @app.post('/webhooks/hf-dataset')
 async def hf_dataset_webhook(request: Request):
     """
-    Receives HuggingFace Dataset webhook events (push to sto-icon-dataset).
-    Triggers a Bitbucket Pipeline run to start automatic model training.
-
-    Configure on HF: Dataset repo → Settings → Webhooks
-      URL: https://<your-backend>/webhooks/hf-dataset
-      Events: repo.update
-
-    Bitbucket credentials required in environment:
-      BB_WORKSPACE     — Bitbucket workspace slug
-      BB_REPO_SLUG     — Repository slug (e.g. sets-warp-backend)
-      BB_APP_PASSWORD  — Bitbucket App Password with pipeline:write scope
-      BB_USERNAME      — Bitbucket username
+    Receives HuggingFace Dataset webhook events and triggers Bitbucket Pipeline.
     """
     BB_WORKSPACE    = os.environ.get('BB_WORKSPACE', '')
     BB_REPO_SLUG    = os.environ.get('BB_REPO_SLUG', 'sets-warp-backend')
@@ -228,7 +214,6 @@ async def hf_dataset_webhook(request: Request):
     BB_USERNAME     = os.environ.get('BB_USERNAME', '')
 
     if not all([BB_WORKSPACE, BB_APP_PASSWORD, BB_USERNAME]):
-        # Not configured — silently accept the webhook (don't expose config state)
         log.debug('HF webhook received but BB credentials not configured — skipping trigger')
         return {'ok': True}
 
@@ -240,7 +225,6 @@ async def hf_dataset_webhook(request: Request):
         return {'ok': True, 'triggered': False, 'reason': 'rate_limited'}
     hf_dataset_webhook._last_trigger = now
 
-    # Trigger Bitbucket Pipeline asynchronously (fire-and-forget)
     import asyncio
     asyncio.create_task(_trigger_bb_pipeline(BB_USERNAME, BB_APP_PASSWORD, BB_WORKSPACE, BB_REPO_SLUG))
     return {'ok': True, 'triggered': True}
@@ -288,10 +272,6 @@ async def admin_merge(
 ):
     """
     Admin endpoint: merge confirmed contributions into knowledge.json.
-    Reads all contributions/**, groups by phash, majority-vote on item_name,
-    writes merged knowledge.json back to HF.
-
-    Call this after reviewing contributions on HF (weekly cron or manually).
     """
     if not ADMIN_KEY or x_admin_key != ADMIN_KEY:
         raise HTTPException(403, 'Forbidden')
@@ -304,7 +284,6 @@ async def admin_merge(
     existing = _load_knowledge_from_hf()
     merged   = dict(existing)
 
-    # Group by phash, majority vote
     from collections import Counter
     phash_votes: dict[str, Counter] = {}
     for c in contributions:
@@ -330,7 +309,7 @@ async def admin_merge(
             {'knowledge': merged, 'updated_at': datetime.now(timezone.utc).isoformat() + 'Z'},
             ensure_ascii=False, indent=2
         ).encode('utf-8')
-    })
+    }, message=f'admin_merge: {new_entries} new entries')
 
     if ok:
         global _knowledge_cache, _knowledge_cache_ts
@@ -351,10 +330,8 @@ def is_valid_crop(png_bytes: bytes) -> bool:
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None:
             return False
-
-        # Calculate standard deviation - low means uniform color (empty slot)
         std_dev = np.std(img)
-        if std_dev < 10: # Threshold for near-uniform images
+        if std_dev < 10:
             return False
         return True
     except Exception:
@@ -363,30 +340,32 @@ def is_valid_crop(png_bytes: bytes) -> bool:
 
 # ── HF Dataset helpers ─────────────────────────────────────────────────────────
 
-def _hf_upload_files(files: dict[str, bytes]) -> bool:
-    """Upload multiple files to HF Dataset repo. Returns True on success."""
+def _hf_upload_files(files: dict[str, bytes], message: str = 'WARP auto-upload') -> bool:
+    """Upload multiple files to HF Dataset repo atomically."""
     if not HF_TOKEN or not HF_REPO_ID:
         log.error('HF_TOKEN or HF_REPO_ID not set')
         return False
     try:
-        from huggingface_hub import HfApi
+        from huggingface_hub import HfApi, CommitOperationAdd
         api = HfApi(token=HF_TOKEN)
-        for path, content in files.items():
-            api.upload_file(
-                path_or_fileobj=content,
-                path_in_repo=path,
-                repo_id=HF_REPO_ID,
-                repo_type='dataset',
-                commit_message=f'WARP auto-contribution: {path}',
-            )
+        operations = [
+            CommitOperationAdd(path_in_repo=path, path_or_fileobj=content)
+            for path, content in files.items()
+        ]
+        api.create_commit(
+            repo_id=HF_REPO_ID,
+            repo_type='dataset',
+            operations=operations,
+            commit_message=message,
+        )
         return True
     except Exception as e:
-        log.error(f'HF upload failed: {e}')
+        log.error(f'HF atomic upload failed: {e}')
         return False
 
 
 def _load_model_version_from_hf() -> dict:
-    """Download models/model_version.json from HF. Returns {} if not published yet."""
+    """Download models/model_version.json from HF."""
     if not HF_REPO_ID:
         return {}
     try:
@@ -404,7 +383,7 @@ def _load_model_version_from_hf() -> dict:
 
 
 def _load_knowledge_from_hf() -> dict[str, str]:
-    """Download knowledge.json from HF Dataset. Returns {} on failure."""
+    """Download knowledge.json from HF Dataset."""
     if not HF_REPO_ID:
         return {}
     try:
@@ -423,23 +402,24 @@ def _load_knowledge_from_hf() -> dict[str, str]:
 
 
 def _load_all_contributions_from_hf() -> list[dict]:
-    """List and download all contribution JSON files from HF Dataset."""
+    """List and download all contribution JSON files from HF Dataset (optimized)."""
     if not HF_TOKEN or not HF_REPO_ID:
         return []
     try:
         from huggingface_hub import HfApi, hf_hub_download
-        api   = HfApi(token=HF_TOKEN)
-        files = api.list_repo_files(HF_REPO_ID, repo_type='dataset')
+        api = HfApi(token=HF_TOKEN)
+        
+        # Optimized listing
+        elements = api.list_repo_tree(HF_REPO_ID, path_in_repo='contributions', repo_type='dataset', recursive=True)
+        json_files = [e.path for e in elements if e.path.endswith('.json')]
+        
         contribs = []
-        for f in files:
-            if f.startswith('contributions/') and f.endswith('.json'):
-                try:
-                    local = hf_hub_download(
-                        HF_REPO_ID, f, repo_type='dataset', token=HF_TOKEN
-                    )
-                    contribs.append(json.loads(Path(local).read_text()))
-                except Exception as e:
-                    log.debug(f'skip {f}: {e}')
+        for f in json_files:
+            try:
+                local = hf_hub_download(HF_REPO_ID, f, repo_type='dataset', token=HF_TOKEN)
+                contribs.append(json.loads(Path(local).read_text()))
+            except Exception as e:
+                log.debug(f'skip {f}: {e}')
         return contribs
     except Exception as e:
         log.error(f'list contributions failed: {e}')
@@ -466,7 +446,6 @@ def _increment_rate_limit(ip: str) -> None:
     if ip not in _rate_limit:
         _rate_limit[ip] = {}
     _rate_limit[ip][today] = _rate_limit[ip].get(today, 0) + 1
-    # Clean old dates
     _rate_limit[ip] = {k: v for k, v in _rate_limit[ip].items() if k >= today}
 
 
