@@ -104,6 +104,16 @@ def _list_staging_folders() -> list[str]:
     """Return list of install_id staging folder names."""
     from huggingface_hub import HfApi
     api   = HfApi(token=HF_TOKEN)
+    try:
+        # Optimization: list only the 'staging/' directory non-recursively
+        elements = api.list_repo_tree(HF_DATASET, path_in_repo='staging', repo_type='dataset', recursive=False)
+        folders = [e.path.split('/')[-1] for e in elements if e.type == 'dir']
+        if folders:
+            return sorted(folders)
+    except Exception as e:
+        log.warning(f"list_repo_tree('staging') failed: {e}. Falling back to full list.")
+
+    # Fallback to the old method (might timeout on large repos)
     files = list(api.list_repo_files(HF_DATASET, repo_type='dataset'))
     folders = {
         f.split('/')[1]
@@ -240,8 +250,30 @@ def _list_screen_type_files(folders: list[str]) -> list[tuple[str, str, str]]:
     """
     from huggingface_hub import HfApi
     api   = HfApi(token=HF_TOKEN)
-    files = list(api.list_repo_files(HF_DATASET, repo_type='dataset'))
     result = []
+
+    # Optimization: instead of listing the whole repo, list each staging/<id>/screen_types
+    for iid in folders:
+        try:
+            path = f'staging/{iid}/screen_types'
+            # recursive=True here is fine because we are limited to one user's screen_types
+            elements = api.list_repo_tree(HF_DATASET, path_in_repo=path, repo_type='dataset', recursive=True)
+            for e in elements:
+                # e.path: staging/<iid>/screen_types/<stype>/<sha>.png
+                parts = e.path.split('/')
+                if len(parts) == 5 and e.path.endswith('.png'):
+                    stype = parts[3]
+                    sha = parts[4][:-4] # strip .png
+                    result.append((iid, stype, sha))
+        except Exception:
+            # Folder might not exist for this user
+            continue
+
+    if result:
+        return result
+
+    # Fallback (slow, might timeout on large repos)
+    files = list(api.list_repo_files(HF_DATASET, repo_type='dataset'))
     for f in files:
         # staging/<install_id>/screen_types/<stype>/<sha>.png
         parts = f.split('/')
@@ -719,7 +751,7 @@ def train(winner_labels: dict[str, str], sha_source: dict[str, str],
     dl_val   = torch.utils.data.DataLoader(ds_val,   batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
 
     # ── Model ────────────────────────────────────────────────────────────────
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda' if torch.device('cuda' if torch.cuda.is_available() else 'cpu') else 'cpu')
     print(f'Training on {device}...')
 
     model = tv_models.efficientnet_b0(weights=tv_models.EfficientNet_B0_Weights.IMAGENET1K_V1)
