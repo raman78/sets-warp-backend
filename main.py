@@ -16,11 +16,13 @@
 #     contributions/YYYY-MM-DD/<uuid>.png   — crop image
 #     knowledge.json                        — merged, approved knowledge base
 #
-# Environment variables (set in Render/Railway dashboard):
-#   HF_TOKEN        — HF write token (kept SECRET, never in client code)
+# Environment variables (set in Render dashboard):
+#   HF_TOKEN        — HF write token (kept SECRET)
 #   HF_REPO_ID      — e.g. "sets-sto/warp-knowledge"
 #   ADMIN_KEY       — secret key for /admin/merge endpoint
 #   MAX_REQ_PER_IP  — rate limit per IP per day (default: 500)
+#   GH_TOKEN        — GitHub Personal Access Token (with workflow scope)
+#   GH_REPO         — GitHub repository (e.g. "sets-sto/sets-warp-backend")
 
 from __future__ import annotations
 
@@ -45,11 +47,30 @@ from pydantic import BaseModel, Field, field_validator
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
+# ── Load .env (for local dev) ─────────────────────────────────────────────────
+
+def _load_env():
+    # Look for .env in the current file's directory or its parent
+    for candidate in [Path(__file__).parent / '.env', Path(__file__).parent.parent / '.env']:
+        if candidate.exists():
+            for line in candidate.read_text().splitlines():
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    k, v = line.split('=', 1)
+                    os.environ.setdefault(k.strip(), v.strip())
+            break
+
+_load_env()
+
 # ── Config from environment ────────────────────────────────────────────────────
 HF_TOKEN       = os.environ.get('HF_TOKEN', '')
 HF_REPO_ID     = os.environ.get('HF_REPO_ID', 'sets-sto/warp-knowledge')
 ADMIN_KEY      = os.environ.get('ADMIN_KEY', '')
 MAX_REQ_PER_IP = int(os.environ.get('MAX_REQ_PER_IP', '500'))
+
+# GitHub Config for automated training triggers
+GH_TOKEN = os.environ.get('GH_TOKEN', '')
+GH_REPO  = os.environ.get('GH_REPO', 'sets-sto/sets-warp-backend')
 
 # In-memory rate limit: {ip: {date_str: count}}
 _rate_limit: dict[str, dict[str, int]] = {}
@@ -65,7 +86,7 @@ _model_version_cache_ts: float = 0.0
 
 app = FastAPI(
     title='WARP Knowledge Backend',
-    version='1.0.0',
+    version='1.1.0',
     description='Community knowledge base for SETS-WARP icon recognition',
 )
 
@@ -92,7 +113,6 @@ class ContributeRequest(BaseModel):
     @field_validator('item_name', 'wrong_name')
     @classmethod
     def sanitize_name(cls, v: str) -> str:
-        # Strip control characters
         return re.sub(r'[\x00-\x1f\x7f]', '', v).strip()
 
     @field_validator('install_id')
@@ -110,11 +130,7 @@ async def health():
 
 @app.get('/model/version')
 async def get_model_version():
-    """
-    Return metadata for the latest centrally-trained model.
-    Clients compare 'trained_at' with their local model_version.json
-    to decide whether to download an update.
-    """
+    """Return metadata for the latest centrally-trained model."""
     global _model_version_cache, _model_version_cache_ts
 
     now = time.time()
@@ -129,9 +145,7 @@ async def get_model_version():
 
 @app.get('/knowledge')
 async def get_knowledge():
-    """
-    Return the merged community knowledge base.
-    """
+    """Return the merged community knowledge base."""
     global _knowledge_cache, _knowledge_cache_ts
 
     now = time.time()
@@ -150,11 +164,9 @@ async def contribute(req: ContributeRequest, request: Request):
     """
     client_ip = _get_client_ip(request)
 
-    # Rate limit
     if not _check_rate_limit(client_ip):
         raise HTTPException(429, 'Rate limit exceeded. Try again tomorrow.')
 
-    # Validate base64 PNG
     try:
         png_bytes = base64.b64decode(req.crop_png_b64)
         if not png_bytes.startswith(b'\x89PNG'):
@@ -164,11 +176,9 @@ async def contribute(req: ContributeRequest, request: Request):
     except Exception as e:
         raise HTTPException(400, f'Invalid crop image: {e}')
 
-    # Validate image content (reject garbage/uniform images)
     if not is_valid_crop(png_bytes):
         raise HTTPException(400, 'Crop rejected: image too uniform or invalid')
 
-    # Build contribution record
     contrib_id  = hashlib.sha256(
         f'{req.install_id}{req.phash}{req.timestamp}'.encode()
     ).hexdigest()[:16]
@@ -185,7 +195,6 @@ async def contribute(req: ContributeRequest, request: Request):
         'ip_hash':         hashlib.sha256(client_ip.encode()).hexdigest()[:8],
     }
 
-    # Store PNG and metadata to HF using atomic commit
     today    = date.today().isoformat()
     hf_path  = f'contributions/{today}/{contrib_id}'
 
@@ -206,73 +215,53 @@ async def contribute(req: ContributeRequest, request: Request):
 @app.post('/webhooks/hf-dataset')
 async def hf_dataset_webhook(request: Request):
     """
-    Receives HuggingFace Dataset webhook events and triggers Bitbucket Pipeline.
+    Receives HuggingFace Dataset webhook events and triggers GitHub Action training.
     """
-    BB_WORKSPACE    = os.environ.get('BB_WORKSPACE', '')
-    BB_REPO_SLUG    = os.environ.get('BB_REPO_SLUG', 'sets-warp-backend')
-    BB_APP_PASSWORD = os.environ.get('BB_APP_PASSWORD', '')
-    BB_USERNAME     = os.environ.get('BB_USERNAME', '')
-
-    if not all([BB_WORKSPACE, BB_APP_PASSWORD, BB_USERNAME]):
-        log.debug('HF webhook received but BB credentials not configured — skipping trigger')
+    if not GH_TOKEN or not GH_REPO:
+        log.debug('HF webhook received but GitHub credentials not configured — skipping trigger')
         return {'ok': True}
 
-    # Rate-limit: at most one pipeline trigger per hour
     now = time.time()
     last_trigger = getattr(hf_dataset_webhook, '_last_trigger', 0)
     if now - last_trigger < 3600:
-        log.debug(f'HF webhook: pipeline trigger skipped (last trigger {int(now - last_trigger)}s ago)')
+        log.debug(f'HF webhook: GitHub trigger skipped (last trigger {int(now - last_trigger)}s ago)')
         return {'ok': True, 'triggered': False, 'reason': 'rate_limited'}
     hf_dataset_webhook._last_trigger = now
 
     import asyncio
-    asyncio.create_task(_trigger_bb_pipeline(BB_USERNAME, BB_APP_PASSWORD, BB_WORKSPACE, BB_REPO_SLUG))
+    asyncio.create_task(_trigger_github_workflow())
     return {'ok': True, 'triggered': True}
 
 
-async def _trigger_bb_pipeline(username: str, password: str, workspace: str, repo: str) -> None:
-    """Fire a Bitbucket Pipelines run for the train-central-model custom pipeline."""
-    import base64
+async def _trigger_github_workflow() -> None:
+    """Fire a GitHub Actions workflow dispatch for train_central_model.yml."""
     import urllib.request
-
-    payload = json.dumps({
-        'target': {
-            'type':     'pipeline_ref_target',
-            'ref_type': 'branch',
-            'ref_name': 'main',
-            'selector': {
-                'type':    'custom',
-                'pattern': 'train-central-model',
-            },
-        }
-    }).encode('utf-8')
-
-    credentials = base64.b64encode(f'{username}:{password}'.encode()).decode()
-    url = f'https://api.bitbucket.org/2.0/repositories/{workspace}/{repo}/pipelines/'
+    
+    url = f'https://api.github.com/repos/{GH_REPO}/actions/workflows/train_central_model.yml/dispatches'
+    payload = json.dumps({'ref': 'main'}).encode('utf-8')
+    
     req = urllib.request.Request(
         url,
         data=payload,
         headers={
-            'Authorization': f'Basic {credentials}',
-            'Content-Type':  'application/json',
+            'Authorization': f'token {GH_TOKEN}',
+            'Accept':        'application/vnd.github.v3+json',
+            'User-Agent':    'WARP-Backend-Trigger',
         },
         method='POST',
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
-            result = json.loads(resp.read())
-            log.info(f'BB Pipeline triggered: uuid={result.get("uuid")} state={result.get("state", {}).get("name")}')
+            log.info(f'GitHub Workflow triggered on {GH_REPO} (Status: {resp.status})')
     except Exception as e:
-        log.warning(f'BB Pipeline trigger failed: {e}')
+        log.warning(f'GitHub Workflow trigger failed: {e}')
 
 
 @app.post('/admin/merge')
 async def admin_merge(
     x_admin_key: str = Header(..., alias='X-Admin-Key')
 ):
-    """
-    Admin endpoint: merge confirmed contributions into knowledge.json.
-    """
+    """Admin endpoint: merge confirmed contributions into knowledge.json."""
     if not ADMIN_KEY or x_admin_key != ADMIN_KEY:
         raise HTTPException(403, 'Forbidden')
 
@@ -280,7 +269,6 @@ async def admin_merge(
     if not contributions:
         return {'ok': True, 'merged': 0, 'message': 'No contributions found'}
 
-    # Existing knowledge as base
     existing = _load_knowledge_from_hf()
     merged   = dict(existing)
 
@@ -297,13 +285,11 @@ async def admin_merge(
     new_entries = 0
     for ph, votes in phash_votes.items():
         winner, count = votes.most_common(1)[0]
-        # Require at least 2 confirmations OR 1 if no existing entry
         if count >= 2 or (count >= 1 and ph not in merged):
             if merged.get(ph) != winner:
                 merged[ph] = winner
                 new_entries += 1
 
-    # Write back to HF
     ok = _hf_upload_files({
         'knowledge.json': json.dumps(
             {'knowledge': merged, 'updated_at': datetime.now(timezone.utc).isoformat() + 'Z'},
@@ -331,9 +317,7 @@ def is_valid_crop(png_bytes: bytes) -> bool:
         if img is None:
             return False
         std_dev = np.std(img)
-        if std_dev < 10:
-            return False
-        return True
+        return std_dev >= 10
     except Exception:
         return False
 
@@ -408,11 +392,8 @@ def _load_all_contributions_from_hf() -> list[dict]:
     try:
         from huggingface_hub import HfApi, hf_hub_download
         api = HfApi(token=HF_TOKEN)
-        
-        # Optimized listing
         elements = api.list_repo_tree(HF_REPO_ID, path_in_repo='contributions', repo_type='dataset', recursive=True)
         json_files = [e.path for e in elements if e.path.endswith('.json')]
-        
         contribs = []
         for f in json_files:
             try:

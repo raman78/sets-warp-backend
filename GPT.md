@@ -20,9 +20,11 @@ Handles democratic voting on community data and automated model training (Icon C
 6. **Error Handling**: Strict verification of connectivity and HF timeouts. Use non-recursive listing.
 7. **Security**: NEVER hardcode tokens (HF_TOKEN). Use environment variables or .env files.
 8. **Atomic Uploads**: Group model files into a single HF commit using `CommitOperationAdd`.
-9. **Documentation**: Keep documentation up to date.
-   - Technical and user documentation: `/docs` folder (create if missing).
-   - Model documentation and CHANGELOG: Root directory.
+9. **Documentation**: Actively search for and maintain all project documentation.
+   - Update `CHANGELOG.md` in the root directory for all changes.
+   - Maintain technical and user documentation in the `/docs` folder (create if missing).
+   - Update `README.md` and any other `.md` files to reflect architectural or usage changes.
+   - Ensure all documentation is consistent and cross-linked.
 
 ## Core Commands
 - **Dry run training**: `python admin_train.py`

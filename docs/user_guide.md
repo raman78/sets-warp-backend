@@ -28,13 +28,21 @@ The client can check if a new centrally-trained model is available for download.
 ## Admin Procedures
 
 ### 1. Merging Contributions
-Confirmed contributions can be merged into the master `knowledge.json` using the `/admin/merge` endpoint.
+Confirmed contributions can be merged into the master `knowledge.json` using the [admin_merge.py](../admin_merge.py) script or the `/admin/merge` endpoint.
 - **Requirement**: `X-Admin-Key` header with the secret `ADMIN_KEY`.
 
 ### 2. Manual Model Training
-Training can be manually triggered by running `admin_train.py` with appropriate flags:
+Training can be manually triggered by running [admin_train.py](../admin_train.py) with appropriate flags:
 - `python admin_train.py --train --min 1`
+
+### 3. Automated Training
+Automated training is handled by [GitHub Actions](../.github/workflows/train_central_model.yml) and can be triggered by Hugging Face webhooks through [main.py](../main.py).
 
 ## Support and Troubleshooting
 - **Rate Limiting**: Users are limited to a specific number of requests per day to prevent abuse.
 - **Health Check**: Verify if the backend is online at `/health`.
+
+## Related Documentation
+- [Technical Overview](./technical_overview.md)
+- [Main README](../README.md)
+- [Agent Guidelines (CLAUDE.md)](../CLAUDE.md)
