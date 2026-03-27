@@ -751,7 +751,7 @@ def train(winner_labels: dict[str, str], sha_source: dict[str, str],
     dl_val   = torch.utils.data.DataLoader(ds_val,   batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
 
     # ── Model ────────────────────────────────────────────────────────────────
-    device = torch.device('cuda' if torch.device('cuda' if torch.cuda.is_available() else 'cpu') else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Training on {device}...')
 
     model = tv_models.efficientnet_b0(weights=tv_models.EfficientNet_B0_Weights.IMAGENET1K_V1)
