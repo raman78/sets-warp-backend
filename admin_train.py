@@ -33,6 +33,7 @@ import logging
 import os
 import sys
 import tempfile
+import time
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -357,6 +358,7 @@ def train_screen_classifier(
     models_dir: Path,
     tmpdir: Path,
     prev_model_pt: Path | None = None,
+    deadline: float | None = None,
 ) -> tuple[float, int]:
     """
     Download winning screenshots, fine-tune MobileNetV3-Small, save to models_dir.
@@ -530,6 +532,9 @@ def train_screen_classifier(
     patience_count = 0
 
     for epoch in range(SC_MAX_EPOCHS):
+        if deadline is not None and time.monotonic() > deadline:
+            print(f'  Time budget exceeded, stopping screen classifier at epoch {epoch+1}.')
+            break
         if epoch == SC_MAX_EPOCHS // 2 and n < 30:
             for p in model.features.parameters():
                 p.requires_grad = True
@@ -622,7 +627,8 @@ def collect_votes(staging_folders: list[str]) -> tuple[dict[str, str], dict[str,
 
 def train(winner_labels: dict[str, str], sha_source: dict[str, str],
           models_dir: Path, tmpdir: Path,
-          prev_model_pt: Path | None = None) -> tuple[float, int]:
+          prev_model_pt: Path | None = None,
+          deadline: float | None = None) -> tuple[float, int]:
     """
     Download winning crops, train EfficientNet-B0, save model to models_dir.
 
@@ -805,6 +811,9 @@ def train(winner_labels: dict[str, str], sha_source: dict[str, str],
     patience_count = 0
 
     for epoch in range(MAX_EPOCHS):
+        if deadline is not None and time.monotonic() > deadline:
+            print(f'  Time budget exceeded, stopping icon classifier at epoch {epoch+1}.')
+            break
         if epoch == MAX_EPOCHS // 2 and n < 50:
             for p in model.features.parameters():
                 p.requires_grad = True
@@ -1019,9 +1028,12 @@ Environment (.env or env vars in CI):
             print(f'No previous screen_classifier.pt ({_e}) — will train from ImageNet.')
             prev_sc_pt = None
 
+        # Allow 50 min for training (leaves ~10 min buffer for upload within 60 min CI timeout)
+        _train_deadline = time.monotonic() + 50 * 60
+
         print('\nTraining EfficientNet-B0 (icon classifier)...')
         val_acc, n_samples = train(winner_labels, sha_source, models_dir, tmpdir,
-                                   prev_model_pt=prev_icon_pt)
+                                   prev_model_pt=prev_icon_pt, deadline=_train_deadline)
 
         # Train screen_classifier if data available
         sc_val_acc: float | None = None
@@ -1038,7 +1050,8 @@ Environment (.env or env vars in CI):
                 if len(sc_winner_map) >= SC_MIN_SAMPLES:
                     print(f'\nTraining MobileNetV3-Small (screen classifier, {sc_n_users} user(s))...')
                     sc_val_acc, sc_n_samples = train_screen_classifier(
-                        sc_winner_map, models_dir, tmpdir, prev_model_pt=prev_sc_pt)
+                        sc_winner_map, models_dir, tmpdir, prev_model_pt=prev_sc_pt,
+                        deadline=_train_deadline)
                 else:
                     print(f'Not enough screen type data ({len(sc_winner_map)} < {SC_MIN_SAMPLES}) — skipping screen classifier training.')
         except Exception as e:
