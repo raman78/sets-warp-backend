@@ -103,11 +103,12 @@ def _require_hf():
 def _list_staging_folders() -> list[str]:
     """Return list of install_id staging folder names."""
     from huggingface_hub import HfApi
+    from huggingface_hub.hf_api import RepoFolder
     api   = HfApi(token=HF_TOKEN)
     try:
         # Optimization: list only the 'staging/' directory non-recursively
         elements = api.list_repo_tree(HF_DATASET, path_in_repo='staging', repo_type='dataset', recursive=False)
-        folders = [e.path.split('/')[-1] for e in elements if e.type == 'dir']
+        folders = [e.path.split('/')[-1] for e in elements if isinstance(e, RepoFolder)]
         if folders:
             return sorted(folders)
     except Exception as e:
@@ -384,19 +385,17 @@ def train_screen_classifier(
     snap_sc.mkdir(exist_ok=True)
 
     print(f'\nDownloading screen type screenshots from {len(by_iid_sc)} contributor(s)...')
-    for iid in sorted(by_iid_sc):
-        print(f'  {iid}: {len(by_iid_sc[iid])} screenshot(s)...')
-        try:
-            _snap_sc(
-                repo_id=HF_DATASET,
-                repo_type='dataset',
-                token=HF_TOKEN or None,
-                allow_patterns=[f'staging/{iid}/screen_types/**/*.png'],
-                local_dir=str(snap_sc),
-                ignore_patterns=['*.gitattributes', 'README*', '*.md'],
-            )
-        except Exception as e:
-            print(f'  WARNING: snapshot_download failed for {iid}: {e}')
+    try:
+        _snap_sc(
+            repo_id=HF_DATASET,
+            repo_type='dataset',
+            token=HF_TOKEN or None,
+            allow_patterns=[f'staging/{iid}/screen_types/**/*.png' for iid in by_iid_sc],
+            local_dir=str(snap_sc),
+            ignore_patterns=['*.gitattributes', 'README*', '*.md'],
+        )
+    except Exception as e:
+        print(f'  WARNING: snapshot_download failed: {e}')
 
     images, labels = [], []
     for iid, items in by_iid_sc.items():
@@ -660,20 +659,17 @@ def train(winner_labels: dict[str, str], sha_source: dict[str, str],
     snap_cache.mkdir(exist_ok=True)
 
     print(f'\nDownloading crops from {len(by_iid)} contributor(s) via snapshot_download...')
-    for iid in sorted(by_iid):
-        n_iid = len(by_iid[iid])
-        print(f'  {iid}: {n_iid} crop(s)...')
-        try:
-            _snap(
-                repo_id=HF_DATASET,
-                repo_type='dataset',
-                token=HF_TOKEN or None,
-                allow_patterns=[f'staging/{iid}/crops/*.png'],
-                local_dir=str(snap_cache),
-                ignore_patterns=['*.gitattributes', 'README*', '*.md'],
-            )
-        except Exception as e:
-            print(f'  WARNING: snapshot_download failed for {iid}: {e}')
+    try:
+        _snap(
+            repo_id=HF_DATASET,
+            repo_type='dataset',
+            token=HF_TOKEN or None,
+            allow_patterns=[f'staging/{iid}/crops/*.png' for iid in by_iid],
+            local_dir=str(snap_cache),
+            ignore_patterns=['*.gitattributes', 'README*', '*.md'],
+        )
+    except Exception as e:
+        print(f'  WARNING: snapshot_download failed: {e}')
 
     crops, labels = [], []
     for iid, items in by_iid.items():
