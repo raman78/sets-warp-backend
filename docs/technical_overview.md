@@ -37,6 +37,26 @@ The backend serves as a central hub for the WARP (Weapon & Armor Recognition Pro
 - **CI/CD**: GitHub Actions (for automated training triggers). See [.github/workflows/train_central_model.yml](../.github/workflows/train_central_model.yml).
 - **Storage**: Hugging Face Hub (Dataset repo).
 
+## GitHub Actions Training Workflow
+
+The workflow (`.github/workflows/train_central_model.yml`) runs on a schedule (every hour) and on manual dispatch. Key characteristics:
+
+- **Runner**: `ubuntu-latest` — **no GPU**. PyTorch is installed with `--index-url https://download.pytorch.org/whl/cpu`. Training runs on CPU.
+- **Timeout**: 60 minutes hard cap.
+- **Skip logic**: `--skip-if-unchanged` exits early (~60s) if no new crops have arrived since the last training run.
+
+### Known Pitfalls
+
+| Issue | Root cause | Fix applied |
+|---|---|---|
+| `AssertionError: Torch not compiled with CUDA enabled` | Nested `torch.device()` in condition was always truthy → always selected `cuda` | Use `torch.cuda.is_available()` directly |
+| `AttributeError: 'RepoFolder' object has no attribute 'type'` | `list_repo_tree()` returns `RepoFolder` objects which have no `.type` attribute | Use `isinstance(e, RepoFolder)` |
+| Training timeout >1h | Per-contributor `snapshot_download` loop caused N full dataset metadata scans | Single bulk `snapshot_download` call with all patterns |
+
+### HF Listing Strategy
+
+`_list_staging_folders()` uses `list_repo_tree(..., recursive=False)` to fetch only the top-level `staging/` directory — O(1) API call instead of a full recursive scan. Falls back to `list_repo_files()` only on exception.
+
 ## Related Documentation
 - [User Guide](./user_guide.md)
 - [Agent Guidelines (CLAUDE.md)](../CLAUDE.md)
