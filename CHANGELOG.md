@@ -20,3 +20,4 @@
 - Fixed GitHub Actions training workflow always targeting CUDA device: nested `torch.device()` in condition was always truthy, forcing `cuda` even on CPU-only runners → replaced with `torch.device('cuda' if torch.cuda.is_available() else 'cpu')`.
 - Fixed `AttributeError: 'RepoFolder' object has no attribute 'type'` in `_list_staging_folders`: replaced `e.type == 'dir'` check with `isinstance(e, RepoFolder)`, preventing silent fallback to slow full-repo listing.
 - Fixed GitHub Actions training timeout (>1h): per-contributor `snapshot_download` loop caused N full dataset metadata scans; replaced with a single call listing all patterns at once.
+- Fixed CPU training exceeding 60 min CI timeout: added `deadline` parameter (monotonic timestamp) to `train()` and `train_screen_classifier()`; `main()` sets deadline = now + 50 min, leaving ~10 min buffer for model upload.

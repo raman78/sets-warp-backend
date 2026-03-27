@@ -51,7 +51,12 @@ The workflow (`.github/workflows/train_central_model.yml`) runs on a schedule (e
 |---|---|---|
 | `AssertionError: Torch not compiled with CUDA enabled` | Nested `torch.device()` in condition was always truthy → always selected `cuda` | Use `torch.cuda.is_available()` directly |
 | `AttributeError: 'RepoFolder' object has no attribute 'type'` | `list_repo_tree()` returns `RepoFolder` objects which have no `.type` attribute | Use `isinstance(e, RepoFolder)` |
-| Training timeout >1h | Per-contributor `snapshot_download` loop caused N full dataset metadata scans | Single bulk `snapshot_download` call with all patterns |
+| Download timeout >1h | Per-contributor `snapshot_download` loop caused N full dataset metadata scans | Single bulk `snapshot_download` call with all patterns |
+| CPU training exceeds 60 min limit | EfficientNet-B0 on CPU with ~3000 samples: one epoch >8 min × 30 epochs = hours | `deadline` parameter in both `train()` functions; `main()` sets `now + 50 min` |
+
+### Time Budget
+
+Training budget is set at **50 minutes** from when `main()` enters the training block. This leaves approximately 10 minutes for model upload to HF Hub. Both `train()` and `train_screen_classifier()` accept a `deadline: float | None` parameter (a `time.monotonic()` timestamp); each epoch checks the deadline before starting and exits early if exceeded. The best model state accumulated so far is still saved and uploaded.
 
 ### HF Listing Strategy
 
