@@ -53,14 +53,35 @@ The workflow (`.github/workflows/train_central_model.yml`) runs on a schedule (e
 | `AttributeError: 'RepoFolder' object has no attribute 'type'` | `list_repo_tree()` returns `RepoFolder` objects which have no `.type` attribute | Use `isinstance(e, RepoFolder)` |
 | Download timeout >1h | Per-contributor `snapshot_download` loop caused N full dataset metadata scans | Single bulk `snapshot_download` call with all patterns |
 | CPU training exceeds 60 min limit | EfficientNet-B0 on CPU with ~3000 samples: one epoch >8 min × 30 epochs = hours | `deadline` parameter in both `train()` functions; `main()` sets `now + 50 min` |
+| `snapshot_download` hangs indefinitely (~1h) on a specific file | `httpx` (used internally) is async — `socket.setdefaulttimeout` has no effect on it; one file stalls the entire download silently | Replaced with `urllib.request` + `ThreadPoolExecutor(16)` — urllib uses blocking sockets, socket timeout of 120 s kills any stalled read |
 
 ### Time Budget
 
 Training budget is set at **50 minutes** from when `main()` enters the training block. This leaves approximately 10 minutes for model upload to HF Hub. Both `train()` and `train_screen_classifier()` accept a `deadline: float | None` parameter (a `time.monotonic()` timestamp); each epoch checks the deadline before starting and exits early if exceeded. The best model state accumulated so far is still saved and uploaded.
 
+### Crop & Screenshot Download Strategy
+
+Files are downloaded in parallel using `urllib.request` in a `ThreadPoolExecutor(max_workers=16)`. Only the exact files needed (known SHA + install_id pairs from the voting step) are fetched — no full-repo metadata scan. `socket.setdefaulttimeout(120)` is set globally before downloads begin; any stalled TCP read raises `socket.timeout` after 2 minutes, which is caught per-file and logged as a skip. `snapshot_download` (httpx/async) was abandoned because httpx async I/O bypasses Python's socket timeout mechanism entirely.
+
 ### HF Listing Strategy
 
 `_list_staging_folders()` uses `list_repo_tree(..., recursive=False)` to fetch only the top-level `staging/` directory — O(1) API call instead of a full recursive scan. Falls back to `list_repo_files()` only on exception.
+
+## Render Deployment
+
+The FastAPI service is deployed on Render as a web service (`render.yaml`). Key notes:
+
+- **Python version**: 3.12 (specified in `render.yaml`)
+- **Start command**: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+- **Health check**: `/health`
+- **Dependencies**: `requirements.txt` with **pinned exact versions** (`==`) — unpinned deps caused `starlette-1.0.0` to be installed, which is incompatible with `fastapi 0.135.x` and caused uvicorn to start and immediately exit (port scan timeout on Render).
+
+### Render Known Pitfalls
+
+| Issue | Root cause | Fix |
+|---|---|---|
+| `Port scan timeout reached, no open ports detected` | `starlette-1.0.0` (major release, breaking changes) installed via unpinned `starlette>=...` | Pin all deps with `==` in `requirements.txt` |
+| Deploy picks up wrong package versions | No upper bounds in requirements → new releases break compatibility | Use `==` pins, update deliberately |
 
 ## Related Documentation
 - [User Guide](./user_guide.md)
