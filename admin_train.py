@@ -225,7 +225,7 @@ def _upload_model(models_dir: Path, n_classes: int, val_acc: float,
         ops.append(CommitOperationAdd(path_in_repo='models/screen_classifier_labels.json', path_or_fileobj=str(sc_labels)))
 
     msg = (f'admin_train: icon {n_classes}cls val={val_acc:.1%} ({n_samples}s/{n_users}u)'
-           + (f'; screen {len(set(version_data.get("screen_n_samples", 0)))}s val={sc_val_acc:.1%}'
+           + (f'; screen {sc_n_samples}s val={sc_val_acc:.1%}'
               if sc_val_acc is not None else ''))
     try:
         api.create_commit(
