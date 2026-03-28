@@ -374,7 +374,6 @@ def train_screen_classifier(
 
     _log_sc.getLogger('httpx').setLevel(_log_sc.WARNING)
 
-    from huggingface_hub import snapshot_download as _snap_sc
     from collections import defaultdict as _dd_sc2
 
     # ── Collect screenshots (bulk download per install_id) ────────────────────
@@ -386,23 +385,40 @@ def train_screen_classifier(
     snap_sc = tmpdir / 'snap_sc'
     snap_sc.mkdir(exist_ok=True)
 
-    print(f'\nDownloading screen type screenshots from {len(by_iid_sc)} contributor(s)...')
+    print(f'\nDownloading {len(winner_map)} screenshots from {len(by_iid_sc)} contributor(s)...')
     import socket as _socket_sc
-    _prev_timeout_sc = _socket_sc.getdefaulttimeout()
+    import urllib.request as _urllib_sc
+    from concurrent.futures import ThreadPoolExecutor as _TPE_sc
+
     _socket_sc.setdefaulttimeout(120)
-    try:
-        _snap_sc(
-            repo_id=HF_DATASET,
-            repo_type='dataset',
-            token=HF_TOKEN or None,
-            allow_patterns=[f'staging/{iid}/screen_types/**/*.png' for iid in by_iid_sc],
-            local_dir=str(snap_sc),
-            ignore_patterns=['*.gitattributes', 'README*', '*.md'],
-        )
-    except Exception as e:
-        print(f'  WARNING: snapshot_download failed: {e}')
-    finally:
-        _socket_sc.setdefaulttimeout(_prev_timeout_sc)
+    _hf_base_sc = f'https://huggingface.co/datasets/{HF_DATASET}/resolve/main'
+    _opener_sc = _urllib_sc.build_opener()
+    if HF_TOKEN:
+        _opener_sc.addheaders = [('Authorization', f'Bearer {HF_TOKEN}')]
+
+    def _fetch_screen(args: tuple[str, str, str]) -> bool:
+        iid, sha, stype = args
+        dest = snap_sc / 'staging' / iid / 'screen_types' / stype / f'{sha}.png'
+        if dest.exists():
+            return True
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            url = f'{_hf_base_sc}/staging/{iid}/screen_types/{stype}/{sha}.png'
+            with _opener_sc.open(url) as r:
+                dest.write_bytes(r.read())
+            return True
+        except Exception:
+            return False
+
+    _sc_tasks = [(iid, sha, stype) for sha, (stype, iid) in winner_map.items()]
+    _sc_ok = _sc_fail = 0
+    with _TPE_sc(max_workers=16) as _pool_sc:
+        for _r in _pool_sc.map(_fetch_screen, _sc_tasks):
+            if _r:
+                _sc_ok += 1
+            else:
+                _sc_fail += 1
+    print(f'  {_sc_ok} downloaded, {_sc_fail} failed/skipped.')
 
     images, labels = [], []
     for iid, items in by_iid_sc.items():
@@ -650,16 +666,15 @@ def train(winner_labels: dict[str, str], sha_source: dict[str, str],
     import random
     from collections import Counter as _Counter
 
-    # ── Collect crops (bulk download per install_id via snapshot_download) ────
-    # snapshot_download fetches an entire folder in parallel — far fewer HTTP
-    # round-trips than one hf_hub_download call per file.
-    import logging as _logging
-    _logging.getLogger('httpx').setLevel(_logging.WARNING)   # suppress HEAD spam
-
-    from huggingface_hub import snapshot_download as _snap
+    # ── Collect crops (parallel urllib download with socket timeout) ─────────
+    # urllib.request uses blocking sockets → socket.setdefaulttimeout applies,
+    # killing stalled TCP reads that httpx/snapshot_download cannot time out.
+    import socket as _socket
+    import urllib.request as _urllib
     from collections import defaultdict as _dd3
+    from concurrent.futures import ThreadPoolExecutor as _TPE
 
-    # Group by install_id so we issue one snapshot call per contributor
+    # Group by install_id
     by_iid: dict[str, list[tuple[str, str]]] = _dd3(list)
     for sha, label in winner_labels.items():
         iid = sha_source.get(sha)
@@ -669,23 +684,35 @@ def train(winner_labels: dict[str, str], sha_source: dict[str, str],
     snap_cache = tmpdir / 'snap'
     snap_cache.mkdir(exist_ok=True)
 
-    print(f'\nDownloading crops from {len(by_iid)} contributor(s) via snapshot_download...')
-    import socket as _socket
-    _prev_timeout = _socket.getdefaulttimeout()
-    _socket.setdefaulttimeout(120)  # kill any stalled TCP read after 2 min
-    try:
-        _snap(
-            repo_id=HF_DATASET,
-            repo_type='dataset',
-            token=HF_TOKEN or None,
-            allow_patterns=[f'staging/{iid}/crops/*.png' for iid in by_iid],
-            local_dir=str(snap_cache),
-            ignore_patterns=['*.gitattributes', 'README*', '*.md'],
-        )
-    except Exception as e:
-        print(f'  WARNING: snapshot_download failed: {e}')
-    finally:
-        _socket.setdefaulttimeout(_prev_timeout)
+    _socket.setdefaulttimeout(120)  # 2 min hard timeout per socket read
+    _hf_base = f'https://huggingface.co/datasets/{HF_DATASET}/resolve/main'
+    _auth_headers = [('Authorization', f'Bearer {HF_TOKEN}')] if HF_TOKEN else []
+    _opener = _urllib.build_opener()
+    _opener.addheaders = _auth_headers
+
+    def _fetch_crop(args: tuple[str, str]) -> bool:
+        iid, sha = args
+        dest = snap_cache / 'staging' / iid / 'crops' / f'{sha}.png'
+        if dest.exists():
+            return True
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with _opener.open(f'{_hf_base}/staging/{iid}/crops/{sha}.png') as r:
+                dest.write_bytes(r.read())
+            return True
+        except Exception:
+            return False
+
+    all_crops = [(iid, sha) for iid, items in by_iid.items() for sha, _ in items]
+    print(f'\nDownloading {len(all_crops)} crops from {len(by_iid)} contributor(s)...')
+    _ok = _fail = 0
+    with _TPE(max_workers=16) as _pool:
+        for _result in _pool.map(_fetch_crop, all_crops):
+            if _result:
+                _ok += 1
+            else:
+                _fail += 1
+    print(f'  {_ok} downloaded, {_fail} failed/skipped.')
 
     crops, labels = [], []
     for iid, items in by_iid.items():
