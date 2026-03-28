@@ -38,6 +38,14 @@ jobs:
           python-version: '3.11'
           cache: 'pip'       # cache ~/.cache/pip between runs
 
+      - name: Cache Hugging Face downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-crops-${{ github.sha }}
+          restore-keys: |
+            hf-crops-
+
       - name: Install dependencies
         run: |
           pip install --quiet \

@@ -387,6 +387,9 @@ def train_screen_classifier(
     snap_sc.mkdir(exist_ok=True)
 
     print(f'\nDownloading screen type screenshots from {len(by_iid_sc)} contributor(s)...')
+    import socket as _socket_sc
+    _prev_timeout_sc = _socket_sc.getdefaulttimeout()
+    _socket_sc.setdefaulttimeout(120)
     try:
         _snap_sc(
             repo_id=HF_DATASET,
@@ -398,6 +401,8 @@ def train_screen_classifier(
         )
     except Exception as e:
         print(f'  WARNING: snapshot_download failed: {e}')
+    finally:
+        _socket_sc.setdefaulttimeout(_prev_timeout_sc)
 
     images, labels = [], []
     for iid, items in by_iid_sc.items():
@@ -665,6 +670,9 @@ def train(winner_labels: dict[str, str], sha_source: dict[str, str],
     snap_cache.mkdir(exist_ok=True)
 
     print(f'\nDownloading crops from {len(by_iid)} contributor(s) via snapshot_download...')
+    import socket as _socket
+    _prev_timeout = _socket.getdefaulttimeout()
+    _socket.setdefaulttimeout(120)  # kill any stalled TCP read after 2 min
     try:
         _snap(
             repo_id=HF_DATASET,
@@ -676,6 +684,8 @@ def train(winner_labels: dict[str, str], sha_source: dict[str, str],
         )
     except Exception as e:
         print(f'  WARNING: snapshot_download failed: {e}')
+    finally:
+        _socket.setdefaulttimeout(_prev_timeout)
 
     crops, labels = [], []
     for iid, items in by_iid.items():
