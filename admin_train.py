@@ -243,6 +243,168 @@ def _upload_model(models_dir: Path, n_classes: int, val_acc: float,
         return False
 
 
+# ── Community anchors (P11) ──────────────────────────────────────────────────
+
+def _list_anchor_grid_files(folders: list[str]) -> list[tuple[str, str]]:
+    """Return list of (install_id, filename) for all anchors_grid_*.json in staging."""
+    from huggingface_hub import HfApi
+    api = HfApi(token=HF_TOKEN)
+    result = []
+    for iid in folders:
+        try:
+            tree = api.list_repo_tree(
+                HF_DATASET, path_in_repo=f'staging/{iid}',
+                repo_type='dataset', recursive=False,
+            )
+            for item in tree:
+                p = getattr(item, 'path', '')
+                fname = p.split('/')[-1]
+                if fname.startswith('anchors_grid_') and fname.endswith('.json'):
+                    result.append((iid, fname))
+        except Exception:
+            pass
+    return result
+
+
+def _download_anchor_grid(install_id: str, filename: str) -> dict | None:
+    """Download staging/<install_id>/<filename> and return parsed dict."""
+    try:
+        from huggingface_hub import hf_hub_download
+        local = hf_hub_download(
+            repo_id=HF_DATASET,
+            filename=f'staging/{install_id}/{filename}',
+            repo_type='dataset',
+            token=HF_TOKEN,
+        )
+        return json.loads(Path(local).read_text(encoding='utf-8'))
+    except Exception as e:
+        log.debug(f'anchor grid {install_id}/{filename} unavailable: {e}')
+        return None
+
+
+def build_community_anchors(folders: list[str], min_contributors: int = 3) -> list[dict]:
+    """
+    Aggregate anchor grids from all staging folders.
+    Returns list of community anchor entries (same format as anchors.json learned entries).
+    Only includes (build_type, aspect) groups with >= min_contributors distinct install_ids.
+    """
+    from collections import defaultdict
+    import statistics
+
+    grid_files = _list_anchor_grid_files(folders)
+    print(f'Found {len(grid_files)} anchor grid file(s) across {len(folders)} user(s).')
+
+    if not grid_files:
+        return []
+
+    # {(build_type, aspect_bucket): {install_id: [grid_entry, ...]}}
+    groups: dict[tuple, dict[str, list]] = defaultdict(lambda: defaultdict(list))
+
+    for install_id, filename in grid_files:
+        entry = _download_anchor_grid(install_id, filename)
+        if not entry:
+            continue
+        build_type = entry.get('build_type', '')
+        aspect     = entry.get('aspect')
+        if not build_type or aspect is None:
+            continue
+        # Bucket aspect to 2 decimal places for grouping
+        aspect_bucket = round(float(aspect), 2)
+        groups[(build_type, aspect_bucket)][install_id].append(entry)
+
+    results = []
+    for (build_type, aspect_bucket), contributors in groups.items():
+        if len(contributors) < min_contributors:
+            print(f'  Skipping {build_type} aspect={aspect_bucket}: '
+                  f'{len(contributors)} contributor(s) < {min_contributors} required')
+            continue
+
+        # Collect all slot data across all contributors
+        slot_vectors: dict[str, list[dict]] = defaultdict(list)
+        resolutions: list[str] = []
+        for iid, entries in contributors.items():
+            for e in entries:
+                slots = e.get('slots', {})
+                for slot_name, geo in slots.items():
+                    if isinstance(geo, dict):
+                        slot_vectors[slot_name].append(geo)
+                if e.get('resolution'):
+                    resolutions.append(e['resolution'])
+
+        # Median per slot per component
+        aggregated_slots = {}
+        for slot_name, geos in slot_vectors.items():
+            if len(geos) < 1:
+                continue
+            def _med(key):
+                vals = [g[key] for g in geos if key in g]
+                return round(statistics.median(vals), 5) if vals else None
+            entry_out = {
+                'x0_rel':   _med('x0_rel'),
+                'y_rel':    _med('y_rel'),
+                'w_rel':    _med('w_rel'),
+                'h_rel':    _med('h_rel'),
+                'step_rel': _med('step_rel'),
+                'count':    round(statistics.median([g['count'] for g in geos if 'count' in g])) if geos else 1,
+            }
+            if None not in entry_out.values():
+                aggregated_slots[slot_name] = entry_out
+
+        if not aggregated_slots:
+            continue
+
+        # Pick most common resolution as representative
+        rep_res = max(set(resolutions), key=resolutions.count) if resolutions else ''
+
+        results.append({
+            'type':          build_type,
+            'aspect':        aspect_bucket,
+            'res':           rep_res,
+            'slots':         aggregated_slots,
+            'n_contributors': len(contributors),
+            'timestamp':     int(__import__('time').time()),
+        })
+        print(f'  Community anchor: {build_type} aspect={aspect_bucket} '
+              f'({len(contributors)} contributors, {len(aggregated_slots)} slots)')
+
+    return results
+
+
+def upload_community_anchors(entries: list[dict], models_dir: Path) -> bool:
+    """Write community_anchors.json and upload to HF knowledge repo."""
+    from huggingface_hub import HfApi, CommitOperationAdd
+    from datetime import datetime, timezone
+    import io
+
+    payload = {
+        'generated_at':  datetime.now(timezone.utc).isoformat() + 'Z',
+        'n_contributors': max((e['n_contributors'] for e in entries), default=0),
+        'entries':        entries,
+    }
+    payload_bytes = json.dumps(payload, indent=2, ensure_ascii=False).encode('utf-8')
+
+    # Save locally for reference
+    local_path = models_dir / 'community_anchors.json'
+    local_path.write_bytes(payload_bytes)
+
+    api = HfApi(token=HF_TOKEN)
+    try:
+        api.create_commit(
+            repo_id=HF_REPO_ID,
+            repo_type='dataset',
+            operations=[CommitOperationAdd(
+                path_in_repo='models/community_anchors.json',
+                path_or_fileobj=io.BytesIO(payload_bytes),
+            )],
+            commit_message=f'community anchors: {len(entries)} entries',
+        )
+        log.info(f'community_anchors.json uploaded ({len(entries)} entries)')
+        return True
+    except Exception as e:
+        log.error(f'community_anchors upload failed: {e}')
+        return False
+
+
 # ── Screen classifier helpers ─────────────────────────────────────────────────
 
 def _list_screen_type_files(folders: list[str]) -> list[tuple[str, str, str]]:
@@ -1131,6 +1293,14 @@ Environment (.env or env vars in CI):
         else:
             print('\nERROR — upload failed.', file=sys.stderr)
             sys.exit(1)
+
+        # 5. Community anchors (P11) — aggregate and upload independently of training
+        print('\nAggregating community anchors (P11)...')
+        anchor_entries = build_community_anchors(folders, min_contributors=3)
+        if anchor_entries:
+            upload_community_anchors(anchor_entries, models_dir)
+        else:
+            print('Not enough contributors for community anchors yet (need >= 3).')
 
 
 if __name__ == '__main__':
