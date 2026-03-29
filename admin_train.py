@@ -749,7 +749,10 @@ def train(winner_labels: dict[str, str], sha_source: dict[str, str],
     transform_train = T.Compose([
         T.ToPILImage(),
         T.RandomResizedCrop(MODEL_IMG_SIZE, scale=(0.8, 1.0)),
-        T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
+        # P7: augmentation — reduces overfitting on community crop datasets
+        T.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2),
+        T.RandomHorizontalFlip(p=0.3),
+        T.RandomAffine(degrees=5, translate=(0.05, 0.05)),
         T.ToTensor(),
         T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
@@ -786,7 +789,12 @@ def train(winner_labels: dict[str, str], sha_source: dict[str, str],
 
     ds_train = CropDataset([crops[i] for i in train_idx], [y[i] for i in train_idx], transform_train)
     ds_val   = CropDataset([crops[i] for i in val_idx],   [y[i] for i in val_idx],   transform_val)
-    dl_train = torch.utils.data.DataLoader(ds_train, batch_size=BATCH_SIZE, shuffle=True,  num_workers=0)
+
+    # P9: hard negatives mining — weights updated per epoch
+    sample_weights = torch.ones(len(ds_train), dtype=torch.float32)
+    sampler  = torch.utils.data.WeightedRandomSampler(
+        sample_weights, num_samples=len(ds_train), replacement=True)
+    dl_train = torch.utils.data.DataLoader(ds_train, batch_size=BATCH_SIZE, sampler=sampler, num_workers=0)
     dl_val   = torch.utils.data.DataLoader(ds_val,   batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
 
     # ── Model ────────────────────────────────────────────────────────────────
@@ -875,6 +883,23 @@ def train(winner_labels: dict[str, str], sha_source: dict[str, str],
         val_acc = correct / total if total > 0 else 0.0
 
         print(f'  Epoch {epoch+1:2d}/{MAX_EPOCHS}  val_acc={val_acc:.1%}  best={best_val_acc:.1%}')
+
+        # P9: hard negatives — re-weight samples the model got wrong with high confidence
+        model.eval()
+        with torch.no_grad():
+            all_logits, all_targets = [], []
+            for xb, yb in torch.utils.data.DataLoader(
+                    ds_train, batch_size=BATCH_SIZE, shuffle=False, num_workers=0):
+                all_logits.append(model(xb.to(device)).cpu())
+                all_targets.append(yb)
+            logits_all  = torch.cat(all_logits)
+            targets_all = torch.cat(all_targets)
+            probs_all   = torch.softmax(logits_all, dim=1)
+            pred_all    = logits_all.argmax(dim=1)
+            conf_all    = probs_all.gather(1, pred_all.unsqueeze(1)).squeeze(1)
+            wrong_mask  = (pred_all != targets_all) & (conf_all > 0.5)
+            sample_weights = torch.clamp(sample_weights + wrong_mask.float(), max=3.0)
+            sampler.weights.copy_(sample_weights)
 
         if val_acc > best_val_acc:
             best_val_acc   = val_acc
