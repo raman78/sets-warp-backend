@@ -1283,9 +1283,12 @@ Environment (.env or env vars in CI):
                       + ', '.join(f'{k}={v}' for k, v in sorted(sc_counts.items())))
                 if len(sc_winner_map) >= SC_MIN_SAMPLES:
                     print(f'\nTraining MobileNetV3-Small (screen classifier, {sc_n_users} user(s))...')
+                    # Separate 8-min deadline — screen classifier is fast (lightweight model,
+                    # small dataset) and must not share the icon classifier's exhausted budget.
+                    _sc_deadline = time.monotonic() + 8 * 60
                     sc_val_acc, sc_n_samples = train_screen_classifier(
                         sc_winner_map, models_dir, tmpdir, prev_model_pt=prev_sc_pt,
-                        deadline=_train_deadline)
+                        deadline=_sc_deadline)
                 else:
                     print(f'Not enough screen type data ({len(sc_winner_map)} < {SC_MIN_SAMPLES}) — skipping screen classifier training.')
         except Exception as e:
