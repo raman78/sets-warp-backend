@@ -22,6 +22,12 @@ on:
   schedule:
     - cron: '0 * * * *'   # every hour, on the hour
   workflow_dispatch:        # allow manual trigger from GitHub UI
+    inputs:
+      force_retrain:
+        description: 'Force re-training even if crops are unchanged'
+        required: false
+        default: 'false'
+        type: boolean
 
 jobs:
   train:
@@ -61,4 +67,8 @@ jobs:
           HF_DATASET: ${{ secrets.HF_DATASET || 'sets-sto/sto-icon-dataset' }}
           HF_REPO_ID: ${{ secrets.HF_REPO_ID || 'sets-sto/warp-knowledge' }}
         run: |
-          python admin_train.py --train --skip-if-unchanged --min 1
+          FORCE_FLAG=""
+          if [ "${{ github.event.inputs.force_retrain }}" = "true" ]; then
+            FORCE_FLAG="--force"
+          fi
+          python admin_train.py --train --skip-if-unchanged --min 1 $FORCE_FLAG

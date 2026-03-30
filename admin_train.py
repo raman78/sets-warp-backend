@@ -1145,6 +1145,8 @@ Environment (.env or env vars in CI):
                         help='Minimum unique users per crop label (default: 1)')
     parser.add_argument('--skip-if-unchanged', action='store_true',
                         help='Skip training when staging crops match the last training manifest')
+    parser.add_argument('--force', action='store_true',
+                        help='Force re-training even when crops are unchanged (overrides --skip-if-unchanged)')
     args = parser.parse_args()
 
     _require_hf()
@@ -1157,6 +1159,8 @@ Environment (.env or env vars in CI):
     print(f'Min votes: {args.min}')
     if args.skip_if_unchanged:
         print('Skip-if-unchanged: ON')
+    if args.force:
+        print('Force retrain: ON')
     print('=' * 60)
 
     # 1. Find staging folders
@@ -1176,7 +1180,7 @@ Environment (.env or env vars in CI):
         return
 
     # 2b. Skip-if-unchanged / MIN_NEW_CROPS check (fast path before downloading)
-    if args.skip_if_unchanged and args.train:
+    if args.skip_if_unchanged and args.train and not args.force:
         current_shas = set(winner_labels.keys())
         last_shas    = _load_training_manifest()
         if last_shas and current_shas == last_shas:
