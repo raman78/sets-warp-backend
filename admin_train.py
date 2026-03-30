@@ -286,7 +286,8 @@ def build_community_anchors(folders: list[str], min_contributors: int = 3) -> li
     """
     Aggregate anchor grids from all staging folders.
     Returns list of community anchor entries (same format as anchors.json learned entries).
-    Only includes (build_type, aspect) groups with >= min_contributors distinct install_ids.
+    Accepts groups with exactly 1 contributor (no conflict) or >= min_contributors (consensus).
+    Skips groups with 2..min_contributors-1 (ambiguous — some data but not enough for consensus).
     """
     from collections import defaultdict
     import statistics
@@ -314,9 +315,12 @@ def build_community_anchors(folders: list[str], min_contributors: int = 3) -> li
 
     results = []
     for (build_type, aspect_bucket), contributors in groups.items():
-        if len(contributors) < min_contributors:
+        n = len(contributors)
+        # Accept sole contributor (no conflict) or consensus (>= min_contributors).
+        # Skip only when 2..min_contributors-1: some data but not enough for reliable consensus.
+        if n > 1 and n < min_contributors:
             print(f'  Skipping {build_type} aspect={aspect_bucket}: '
-                  f'{len(contributors)} contributor(s) < {min_contributors} required')
+                  f'{n} contributor(s) < {min_contributors} required')
             continue
 
         # Collect all slot data across all contributors
