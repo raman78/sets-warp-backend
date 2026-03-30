@@ -711,7 +711,9 @@ def train_screen_classifier(
 
     # ── Training loop ─────────────────────────────────────────────────────────
     best_val_acc   = 0.0
-    best_state     = None
+    # Initialise with pre-training weights so we always have a valid fallback,
+    # even if val_acc never improves above 0 (e.g. tiny val set or bad warm-start).
+    best_state     = {k: v.cpu().clone() for k, v in model.state_dict().items()}
     patience_count = 0
 
     for epoch in range(SC_MAX_EPOCHS):
