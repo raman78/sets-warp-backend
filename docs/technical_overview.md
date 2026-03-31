@@ -4,17 +4,18 @@
 The backend serves as a central hub for the WARP (Weapon & Armor Recognition Program) ecosystem. It facilitates community-driven data collection and automated model training.
 
 ### Components
-1. **FastAPI Service ([main.py](../main.py))**: 
+1. **FastAPI Service ([main.py](../main.py))**:
    - Handles contributions from mobile clients.
    - Serves the merged knowledge base and model version metadata.
    - Manages rate limiting and basic data validation.
 2. **Model Trainer ([admin_train.py](../admin_train.py))**:
    - A standalone script for democratic voting on contributions.
    - Trains two PyTorch models: `icon_classifier` (EfficientNet-B0) and `screen_classifier` (MobileNetV3-Small).
-   - Uploads trained models to Hugging Face Hub.
+   - Builds `ship_type_corrections.json` from Ship Type / Ship Tier OCR correction pairs.
+   - Uploads trained models and correction map to Hugging Face Hub.
 3. **Data Storage (Hugging Face Dataset)**:
    - Stores raw contributions, crops, and screenshots.
-   - Hosts the final models and metadata.
+   - Hosts the final models, metadata, and correction maps.
 
 ## Core Workflows
 
@@ -25,11 +26,24 @@ The backend serves as a central hub for the WARP (Weapon & Armor Recognition Pro
 ### 2. Model Training (Automated/Manual)
 - Triggered via CLI, GitHub Actions Schedule, or [Webhook Dispatcher](../main.py).
 - `admin_train.py` scans `staging/` folders in the dataset.
-- Applies democratic voting: 1 unique `install_id` = 1 vote.
+- Applies democratic voting on icon crops: 1 unique `install_id` = 1 vote.
 - Downloads winning samples and trains/fine-tunes models using PyTorch.
 - Uploads updated models and `model_version.json` to the model repository.
 
-### 3. Knowledge Merging
+### 3. Ship Type / Tier OCR Correction Map
+- `collect_text_corrections()` filters staging annotations where `slot` is `Ship Type`
+  or `Ship Tier`.
+- For each `(ml_name, name)` pair where `ml_name != name`: votes are cast per `install_id`.
+- Majority wins per `ml_name` key → `ship_type_corrections.json`:
+  ```json
+  {"F1eet Support Cruiser": "Fleet Support Cruiser", ...}
+  ```
+- Uploaded to `sets-sto/warp-knowledge/models/ship_type_corrections.json`.
+- Clients download and apply corrections in `text_extractor.py` before ShipDB lookup.
+- Community anchors threshold: groups with n=1 contributor are accepted as tentative
+  truth; n≥2 contributors use median aggregation. (Changed from n≥3 in 2026-03-31.)
+
+### 4. Knowledge Merging
 - [admin_merge.py](../admin_merge.py) (or `/admin/merge` endpoint) consolidates raw contributions into a unified `knowledge.json` mapping.
 
 ## Infrastructure

@@ -282,12 +282,13 @@ def _download_anchor_grid(install_id: str, filename: str) -> dict | None:
         return None
 
 
-def build_community_anchors(folders: list[str], min_contributors: int = 3) -> list[dict]:
+def build_community_anchors(folders: list[str], min_contributors: int = 2) -> list[dict]:
     """
     Aggregate anchor grids from all staging folders.
     Returns list of community anchor entries (same format as anchors.json learned entries).
     Accepts groups with exactly 1 contributor (no conflict) or >= min_contributors (consensus).
     Skips groups with 2..min_contributors-1 (ambiguous — some data but not enough for consensus).
+    With min_contributors=2, all groups n>=1 are accepted (n>1 and n<2 is never true).
     """
     from collections import defaultdict
     import statistics
@@ -407,6 +408,68 @@ def upload_community_anchors(entries: list[dict], models_dir: Path) -> bool:
     except Exception as e:
         log.error(f'community_anchors upload failed: {e}')
         return False
+
+
+# ── Ship Type / Tier OCR correction map ──────────────────────────────────────
+
+def collect_text_corrections(staging_folders: list[str], models_dir: Path) -> None:
+    """
+    Build and upload ship_type_corrections.json from Ship Type / Ship Tier annotations.
+
+    For each (ml_name, name) pair where ml_name != '' and ml_name != name:
+      - 1 vote per install_id
+      - majority winner per ml_name key → corrections dict
+    Uploads to HF as models/ship_type_corrections.json.
+    """
+    from huggingface_hub import HfApi, CommitOperationAdd
+
+    _TEXT_LEARNING_SLOTS = {'Ship Type', 'Ship Tier'}
+
+    # ml_name -> {install_id -> corrected_name}
+    votes: dict[str, dict[str, str]] = defaultdict(dict)
+
+    for iid in staging_folders:
+        anns = _load_staging_annotations(iid)
+        for entry in anns:
+            if entry.get('slot') not in _TEXT_LEARNING_SLOTS:
+                continue
+            ml_name = entry.get('ml_name', '').strip()
+            name    = entry.get('name', '').strip()
+            if ml_name and name and ml_name != name:
+                votes[ml_name][iid] = name  # 1 install_id = 1 vote
+
+    if not votes:
+        print('  No OCR correction pairs found — ship_type_corrections.json not updated.')
+        return
+
+    corrections: dict[str, str] = {}
+    for ml_name, iid_votes in votes.items():
+        label_counts = Counter(iid_votes.values())
+        winner, _ = label_counts.most_common(1)[0]
+        corrections[ml_name] = winner
+
+    print(f'  Built {len(corrections)} OCR correction(s).')
+
+    payload_bytes = json.dumps(corrections, indent=2, ensure_ascii=False).encode('utf-8')
+
+    # Save locally for reference
+    local_path = models_dir / 'ship_type_corrections.json'
+    local_path.write_bytes(payload_bytes)
+
+    api = HfApi(token=HF_TOKEN)
+    try:
+        api.create_commit(
+            repo_id=HF_REPO_ID,
+            repo_type='dataset',
+            operations=[CommitOperationAdd(
+                path_in_repo='models/ship_type_corrections.json',
+                path_or_fileobj=local_path,
+            )],
+            commit_message=f'ship_type_corrections: {len(corrections)} entries',
+        )
+        log.info(f'ship_type_corrections.json uploaded ({len(corrections)} entries)')
+    except Exception as e:
+        log.error(f'ship_type_corrections upload failed: {e}')
 
 
 # ── Screen classifier helpers ─────────────────────────────────────────────────
@@ -789,6 +852,10 @@ def collect_votes(staging_folders: list[str]) -> tuple[dict[str, str], dict[str,
     # sha -> install_id (who uploaded this crop file)
     sha_source: dict[str, str] = {}
 
+    # Slots whose annotations are NOT for icon training.
+    # Ship Type and Ship Tier crops feed ship_type_corrections.json instead.
+    _TEXT_LEARNING_SLOTS = {'Ship Type', 'Ship Tier'}
+
     n_with_data = 0
     for iid in staging_folders:
         anns = _load_staging_annotations(iid)
@@ -796,6 +863,8 @@ def collect_votes(staging_folders: list[str]) -> tuple[dict[str, str], dict[str,
             continue
         n_with_data += 1
         for entry in anns:
+            if entry.get('slot') in _TEXT_LEARNING_SLOTS:
+                continue  # handled by collect_text_corrections(), not icon training
             sha   = entry.get('crop_sha256', '').strip()
             label = entry.get('name', '').strip()
             if sha and label:
@@ -1309,11 +1378,15 @@ Environment (.env or env vars in CI):
 
         # 5. Community anchors (P11) — aggregate and upload independently of training
         print('\nAggregating community anchors (P11)...')
-        anchor_entries = build_community_anchors(folders, min_contributors=3)
+        anchor_entries = build_community_anchors(folders, min_contributors=2)
         if anchor_entries:
             upload_community_anchors(anchor_entries, models_dir)
         else:
-            print('Not enough contributors for community anchors yet (need >= 3).')
+            print('No community anchors to upload yet.')
+
+        # 6. Ship Type / Tier OCR corrections — build and upload independently
+        print('\nBuilding ship type OCR correction map...')
+        collect_text_corrections(folders, models_dir)
 
 
 if __name__ == '__main__':

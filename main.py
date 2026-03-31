@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -74,6 +75,7 @@ GH_REPO  = os.environ.get('GH_REPO', 'sets-sto/sets-warp-backend')
 
 # In-memory rate limit: {ip: {date_str: count}}
 _rate_limit: dict[str, dict[str, int]] = {}
+_rate_limit_lock = asyncio.Lock()
 
 # In-memory knowledge cache (rebuilt at startup + after each merge)
 _knowledge_cache: dict[str, str] = {}
@@ -164,7 +166,7 @@ async def contribute(req: ContributeRequest, request: Request):
     """
     client_ip = _get_client_ip(request)
 
-    if not _check_rate_limit(client_ip):
+    if not await _check_and_increment_rate_limit(client_ip):
         raise HTTPException(429, 'Rate limit exceeded. Try again tomorrow.')
 
     try:
@@ -206,7 +208,6 @@ async def contribute(req: ContributeRequest, request: Request):
     if not success:
         raise HTTPException(503, 'Storage unavailable, please try later')
 
-    _increment_rate_limit(client_ip)
     log.info(f'Contribution accepted: id={contrib_id} item={req.item_name!r}')
 
     return {'ok': True, 'contribution_id': contrib_id}
@@ -412,22 +413,24 @@ def _load_all_contributions_from_hf() -> list[dict]:
 def _get_client_ip(request: Request) -> str:
     forwarded = request.headers.get('X-Forwarded-For')
     if forwarded:
-        return forwarded.split(',')[0].strip()
+        # Take the rightmost IP, added by the trusted Render proxy.
+        # A client can forge earlier entries but not the last one.
+        return forwarded.split(',')[-1].strip()
     return request.client.host if request.client else 'unknown'
 
 
-def _check_rate_limit(ip: str) -> bool:
-    today = str(date.today())
-    counts = _rate_limit.get(ip, {})
-    return counts.get(today, 0) < MAX_REQ_PER_IP
-
-
-def _increment_rate_limit(ip: str) -> None:
-    today = str(date.today())
-    if ip not in _rate_limit:
-        _rate_limit[ip] = {}
-    _rate_limit[ip][today] = _rate_limit[ip].get(today, 0) + 1
-    _rate_limit[ip] = {k: v for k, v in _rate_limit[ip].items() if k >= today}
+async def _check_and_increment_rate_limit(ip: str) -> bool:
+    """Atomically check and increment rate limit. Returns True if allowed."""
+    async with _rate_limit_lock:
+        today = str(date.today())
+        counts = _rate_limit.get(ip, {})
+        if counts.get(today, 0) >= MAX_REQ_PER_IP:
+            return False
+        if ip not in _rate_limit:
+            _rate_limit[ip] = {}
+        _rate_limit[ip][today] = _rate_limit[ip].get(today, 0) + 1
+        _rate_limit[ip] = {k: v for k, v in _rate_limit[ip].items() if k >= today}
+        return True
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
