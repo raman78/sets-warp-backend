@@ -725,7 +725,10 @@ def train_screen_classifier(
 
     # ── Model ─────────────────────────────────────────────────────────────────
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f'Training screen_classifier on {device}...')
+    print(f'\n── screen_classifier (MobileNetV3-Small) {"─" * 38}')
+    print(f'  Dataset : {n} screenshots, {n_classes} classes')
+    print(f'  Device  : {device}')
+    print(f'{"─" * 64}')
 
     model = tv_models.mobilenet_v3_small(weights=tv_models.MobileNet_V3_Small_Weights.IMAGENET1K_V1)
     in_features = model.classifier[-1].in_features
@@ -832,7 +835,7 @@ def train_screen_classifier(
     with open(models_dir / 'screen_classifier_labels.json', 'w', encoding='utf-8') as f:
         json.dump(idx_to_label, f, ensure_ascii=False, indent=2)
 
-    print(f'\nscreen_classifier saved — {n_classes} classes, val_acc={best_val_acc:.1%}')
+    print(f'\n✓ screen_classifier saved — {n_classes} classes, val_acc={best_val_acc:.1%}')
     return best_val_acc, n
 
 
@@ -1036,7 +1039,10 @@ def train(winner_labels: dict[str, str], sha_source: dict[str, str],
 
     # ── Model ────────────────────────────────────────────────────────────────
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f'Training on {device}...')
+    print(f'\n── icon_classifier (EfficientNet-B0) {"─" * 41}')
+    print(f'  Dataset : {n} crops, {n_classes} classes')
+    print(f'  Device  : {device}')
+    print(f'{"─" * 64}')
 
     model = tv_models.efficientnet_b0(weights=tv_models.EfficientNet_B0_Weights.IMAGENET1K_V1)
     in_features = model.classifier[1].in_features
@@ -1160,7 +1166,7 @@ def train(winner_labels: dict[str, str], sha_source: dict[str, str],
     with open(models_dir / 'icon_classifier_meta.json', 'w', encoding='utf-8') as f:
         json.dump({'n_classes': n_classes, 'input_size': MODEL_IMG_SIZE}, f)
 
-    print(f'\nModel saved — {n_classes} classes, val_acc={best_val_acc:.1%}')
+    print(f'\n✓ icon_classifier saved — {n_classes} classes, val_acc={best_val_acc:.1%}')
     return best_val_acc, n
 
 
