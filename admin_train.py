@@ -74,14 +74,15 @@ MIN_SAMPLES    = 5   # require at least 5 total crops to bother training
 MIN_NEW_CROPS  = 10  # minimum new crops since last training to bother retraining
 
 # Screen classifier hyper-parameters (MobileNetV3-Small)
-SC_IMG_SIZE    = 224
-SC_BATCH_SIZE  = 8
-SC_MAX_EPOCHS  = 40
-SC_LR          = 3e-4
-SC_PATIENCE    = 8
-SC_MIN_SAMPLES = 7   # at least 7 screenshots total to bother training
-SC_MIN_KEEP    = 30  # per screen-type: below this count keep all samples
-SC_MAX_KEEP    = 150 # per screen-type: above SC_MIN_KEEP cap to this many
+SC_IMG_SIZE         = 224
+SC_BATCH_SIZE       = 8
+SC_MAX_EPOCHS       = 40
+SC_LR               = 3e-4
+SC_PATIENCE         = 8
+SC_MIN_SAMPLES      = 7   # at least 7 screenshots total to bother training
+SC_MIN_CLASS_SAMPLES = 5  # drop a class from training if it has fewer than this many samples
+SC_MIN_KEEP         = 30  # per screen-type: below this count keep all samples
+SC_MAX_KEEP         = 150 # per screen-type: above SC_MIN_KEEP cap to this many
 
 SCREEN_TYPES = [
     'SPACE_EQ', 'GROUND_EQ', 'TRAITS',
@@ -671,13 +672,30 @@ def train_screen_classifier(
         )
 
     # ── Label map ─────────────────────────────────────────────────────────────
+    # Log per-class distribution and drop classes with too few samples.
+    raw_counts = Counter(labels)
+    print('  Per-class sample counts:')
+    for lbl in sorted(raw_counts):
+        flag = '' if raw_counts[lbl] >= SC_MIN_CLASS_SAMPLES else f'  <-- DROP (< {SC_MIN_CLASS_SAMPLES})'
+        print(f'    {lbl:<22}: {raw_counts[lbl]:>4}{flag}')
+
+    kept = {l for l, c in raw_counts.items() if c >= SC_MIN_CLASS_SAMPLES}
+    dropped = sorted(raw_counts.keys() - kept)
+    if dropped:
+        print(f'  Dropping under-represented classes: {dropped}')
+        images = [img for img, lbl in zip(images, labels) if lbl in kept]
+        labels = [lbl for lbl in labels if lbl in kept]
+        n = len(images)
+        if n < SC_MIN_SAMPLES:
+            raise RuntimeError(f'Only {n} screenshots remain after class filtering (need {SC_MIN_SAMPLES}).')
+
     unique_labels = sorted(set(labels))
     label_to_idx  = {l: i for i, l in enumerate(unique_labels)}
     idx_to_label  = {i: l for l, i in label_to_idx.items()}
     n_classes     = len(unique_labels)
     y             = [label_to_idx[l] for l in labels]
 
-    print(f'{n_classes} screen type classes: {unique_labels}')
+    print(f'  {n_classes} classes for training: {unique_labels}')
 
     # ── Dataset ───────────────────────────────────────────────────────────────
     transform_train = T.Compose([
@@ -701,7 +719,7 @@ def train_screen_classifier(
         def __getitem__(self, i):
             return self.tf(cv2.cvtColor(self.imgs[i], cv2.COLOR_BGR2RGB)), self.lbls[i]
 
-    # Stratified split — classes with 1 sample stay in train only
+    # Stratified split — 20% per class for validation (min 2 if enough samples).
     from collections import defaultdict as _dd_sc
     by_cls_sc: dict[int, list[int]] = _dd_sc(list)
     for i, lbl in enumerate(y):
@@ -710,11 +728,9 @@ def train_screen_classifier(
     val_idx_sc:   list[int] = []
     for lbl, idxs in by_cls_sc.items():
         random.shuffle(idxs)
-        if len(idxs) >= 2:
-            val_idx_sc.append(idxs[0])
-            train_idx_sc.extend(idxs[1:])
-        else:
-            train_idx_sc.extend(idxs)
+        n_val = max(2, len(idxs) // 5) if len(idxs) >= 5 else (1 if len(idxs) >= 2 else 0)
+        val_idx_sc.extend(idxs[:n_val])
+        train_idx_sc.extend(idxs[n_val:])
     random.shuffle(train_idx_sc)
     val_idx_sc = val_idx_sc or train_idx_sc[:1]
 
@@ -727,6 +743,7 @@ def train_screen_classifier(
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'\n── screen_classifier (MobileNetV3-Small) {"─" * 38}')
     print(f'  Dataset : {n} screenshots, {n_classes} classes')
+    print(f'  Split   : {len(train_idx_sc)} train / {len(val_idx_sc)} val')
     print(f'  Device  : {device}')
     print(f'{"─" * 64}')
 
@@ -770,14 +787,9 @@ def train_screen_classifier(
         [1.0 / max(counts[i], 1) for i in range(n_classes)],
         dtype=torch.float32, device=device)
     _cw = _cw / _cw.sum() * n_classes
-
-    class _FocalLoss(torch.nn.Module):
-        def forward(self, logits, targets):
-            ce = _F.cross_entropy(logits, targets, weight=_cw, reduction='none')
-            pt = torch.exp(-ce)
-            return ((1.0 - pt) ** FOCAL_GAMMA * ce).mean()
-
-    criterion = _FocalLoss().to(device)
+    # Plain cross-entropy with class weights — Focal Loss was miscalibrating
+    # softmax outputs (suppressing easy samples → low confidence on correct predictions).
+    criterion = torch.nn.CrossEntropyLoss(weight=_cw).to(device)
 
     # ── Training loop ─────────────────────────────────────────────────────────
     best_val_acc   = 0.0
