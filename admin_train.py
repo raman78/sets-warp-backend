@@ -169,6 +169,36 @@ def _download_crop(install_id: str, sha: str, dest_dir: Path) -> Path | None:
         return None
 
 
+def _create_commit_with_retry(api, repo_id: str, repo_type: str,
+                              operations: list, commit_message: str,
+                              max_retries: int = 3) -> bool:
+    """Call api.create_commit with retry on 429 rate-limit errors."""
+    import re
+    for attempt in range(max_retries):
+        try:
+            api.create_commit(
+                repo_id=repo_id,
+                repo_type=repo_type,
+                operations=operations,
+                commit_message=commit_message,
+            )
+            return True
+        except Exception as e:
+            msg = str(e)
+            if '429' in msg or 'rate limit' in msg.lower():
+                # Parse suggested wait time from HF error ("Retry after N seconds")
+                m = re.search(r'[Rr]etry after (\d+)', msg)
+                wait = int(m.group(1)) + 10 if m else 150
+                if attempt < max_retries - 1:
+                    log.warning(f'HF rate limit hit — waiting {wait}s before retry '
+                                f'({attempt + 1}/{max_retries - 1})…')
+                    time.sleep(wait)
+                    continue
+            log.error(f'Upload failed: {e}')
+            return False
+    return False
+
+
 def _upload_model(models_dir: Path, n_classes: int, val_acc: float,
                   n_samples: int, n_users: int,
                   sc_val_acc: float | None = None,
@@ -225,23 +255,13 @@ def _upload_model(models_dir: Path, n_classes: int, val_acc: float,
     if sc_labels.exists():
         ops.append(CommitOperationAdd(path_in_repo='models/screen_classifier_labels.json', path_or_fileobj=str(sc_labels)))
 
-    msg = (f'admin_train: icon {n_classes}cls val={val_acc:.1%} ({n_samples}s/{n_users}u)'
-           + (f'; screen {sc_n_samples}s val={sc_val_acc:.1%}'
-              if sc_val_acc is not None else ''))
-    try:
-        api.create_commit(
-            repo_id=HF_REPO_ID,
-            repo_type='dataset',
-            operations=ops,
-            commit_message=f'admin_train: icon {n_classes}cls val={val_acc:.1%}'
-                           + (f', screen val={sc_val_acc:.1%}' if sc_val_acc is not None else '')
-                           + f' ({trained_at[:10]})',
-        )
+    commit_msg = (f'admin_train: icon {n_classes}cls val={val_acc:.1%}'
+                  + (f', screen val={sc_val_acc:.1%}' if sc_val_acc is not None else '')
+                  + f' ({trained_at[:10]})')
+    ok = _create_commit_with_retry(api, HF_REPO_ID, 'dataset', ops, commit_msg)
+    if ok:
         log.info(f'Model uploaded to {HF_REPO_ID}: version={sha}, val_acc={val_acc:.1%}')
-        return True
-    except Exception as e:
-        log.error(f'Upload failed: {e}')
-        return False
+    return ok
 
 
 # ── Community anchors (P11) ──────────────────────────────────────────────────
@@ -394,21 +414,15 @@ def upload_community_anchors(entries: list[dict], models_dir: Path) -> bool:
     local_path.write_bytes(payload_bytes)
 
     api = HfApi(token=HF_TOKEN)
-    try:
-        api.create_commit(
-            repo_id=HF_REPO_ID,
-            repo_type='dataset',
-            operations=[CommitOperationAdd(
-                path_in_repo='models/community_anchors.json',
-                path_or_fileobj=io.BytesIO(payload_bytes),
-            )],
-            commit_message=f'community anchors: {len(entries)} entries',
-        )
+    ok = _create_commit_with_retry(
+        api, HF_REPO_ID, 'dataset',
+        [CommitOperationAdd(path_in_repo='models/community_anchors.json',
+                            path_or_fileobj=io.BytesIO(payload_bytes))],
+        f'community anchors: {len(entries)} entries',
+    )
+    if ok:
         log.info(f'community_anchors.json uploaded ({len(entries)} entries)')
-        return True
-    except Exception as e:
-        log.error(f'community_anchors upload failed: {e}')
-        return False
+    return ok
 
 
 # ── Ship Type / Tier OCR correction map ──────────────────────────────────────
@@ -458,19 +472,14 @@ def collect_text_corrections(staging_folders: list[str], models_dir: Path) -> No
     local_path.write_bytes(payload_bytes)
 
     api = HfApi(token=HF_TOKEN)
-    try:
-        api.create_commit(
-            repo_id=HF_REPO_ID,
-            repo_type='dataset',
-            operations=[CommitOperationAdd(
-                path_in_repo='models/ship_type_corrections.json',
-                path_or_fileobj=local_path,
-            )],
-            commit_message=f'ship_type_corrections: {len(corrections)} entries',
-        )
+    ok = _create_commit_with_retry(
+        api, HF_REPO_ID, 'dataset',
+        [CommitOperationAdd(path_in_repo='models/ship_type_corrections.json',
+                            path_or_fileobj=local_path)],
+        f'ship_type_corrections: {len(corrections)} entries',
+    )
+    if ok:
         log.info(f'ship_type_corrections.json uploaded ({len(corrections)} entries)')
-    except Exception as e:
-        log.error(f'ship_type_corrections upload failed: {e}')
 
 
 # ── Screen classifier helpers ─────────────────────────────────────────────────
