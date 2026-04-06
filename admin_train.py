@@ -371,7 +371,7 @@ def build_community_anchors(folders: list[str], min_contributors: int = 2) -> li
                 'w_rel':    _med('w_rel'),
                 'h_rel':    _med('h_rel'),
                 'step_rel': _med('step_rel'),
-                'count':    round(statistics.median([g['count'] for g in geos if 'count' in g])) if geos else 1,
+                'count':    round(statistics.median(counts)) if (counts := [g['count'] for g in geos if 'count' in g]) else 1,
             }
             if None not in entry_out.values():
                 aggregated_slots[slot_name] = entry_out
