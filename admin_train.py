@@ -69,7 +69,6 @@ BATCH_SIZE     = 16
 MAX_EPOCHS     = 30
 LR             = 3e-4
 PATIENCE       = 5
-FOCAL_GAMMA    = 2.0
 MIN_SAMPLES    = 5   # require at least 5 total crops to bother training
 MIN_NEW_CROPS  = 10  # minimum new crops since last training to bother retraining
 
@@ -1106,13 +1105,9 @@ def train(winner_labels: dict[str, str], sha_source: dict[str, str],
         dtype=torch.float32, device=device)
     _cw = _cw / _cw.sum() * n_classes
 
-    class _FocalLoss(torch.nn.Module):
-        def forward(self, logits, targets):
-            ce = _F.cross_entropy(logits, targets, weight=_cw, reduction='none')
-            pt = torch.exp(-ce)
-            return ((1.0 - pt) ** FOCAL_GAMMA * ce).mean()
-
-    criterion = _FocalLoss().to(device)
+    # Plain cross-entropy with class weights — Focal Loss was miscalibrating
+    # softmax outputs on this small balanced dataset (low confidence on correct predictions).
+    criterion = torch.nn.CrossEntropyLoss(weight=_cw).to(device)
 
     # ── Training loop ────────────────────────────────────────────────────────
     best_val_acc   = 0.0
