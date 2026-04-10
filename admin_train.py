@@ -85,7 +85,8 @@ SC_MAX_KEEP         = 150 # per screen-type: above SC_MIN_KEEP cap to this many
 
 SCREEN_TYPES = [
     'SPACE_EQ', 'GROUND_EQ', 'TRAITS',
-    'BOFFS', 'SPECIALIZATIONS', 'SPACE_MIXED', 'GROUND_MIXED',
+    'SPACE_BOFFS', 'GROUND_BOFFS', 'BOFFS',
+    'SPECIALIZATIONS', 'SPACE_MIXED', 'GROUND_MIXED',
 ]
 
 # ── HF helpers ────────────────────────────────────────────────────────────────
