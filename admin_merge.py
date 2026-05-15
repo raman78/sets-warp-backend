@@ -103,15 +103,27 @@ HF_REPO_ID = os.environ.get('HF_REPO_ID', 'sets-sto/warp-knowledge')
 
 # ── HF helpers ─────────────────────────────────────────────────────────────────
 
-def _hf_list_contributions(since: str | None = None) -> list[dict]:
+def _hf_list_contributions(
+    processed_ids:  set[str] | None = None,
+    watermark_date: str | None      = None,
+    since:          str | None      = None,
+) -> tuple[list[dict], list[str], list[Path]]:
     """
-    Fetches all contribution JSONs from HF Dataset.
+    Fetches contribution JSONs from HF Dataset.
 
-    Uses snapshot_download with allow_patterns=['contributions/**/*.json'] so
-    that the entire contributions tree is fetched in parallel (8 workers by
-    default) in a single call. PNGs are excluded by the pattern. Subsequent
-    runs reuse the local HF cache, so only new contributions are downloaded
-    on each invocation.
+    Uses snapshot_download with allow_patterns=['contributions/**/*.json']
+    (cached locally, so unchanged files are just etag-checked, not re-downloaded).
+
+    Returns (contribs, new_ids, all_paths) where:
+      - contribs: parsed JSON records for contributions NOT in processed_ids
+        and whose date directory is >= watermark_date.
+      - new_ids: contribution IDs (file stems) corresponding to those records,
+        in the same order.
+      - all_paths: every contribution file path on disk (regardless of
+        filters). Used by compaction to map id → date.
+
+    Filtering happens AFTER snapshot — the local HF cache handles re-fetch
+    avoidance, so over-fetching is essentially free on subsequent runs.
     """
     if not HF_TOKEN or not HF_REPO_ID:
         print('ERROR: HF_TOKEN or HF_REPO_ID not set', file=sys.stderr)
@@ -122,11 +134,8 @@ def _hf_list_contributions(since: str | None = None) -> list[dict]:
         print('ERROR: pip install huggingface-hub', file=sys.stderr)
         sys.exit(1)
 
-    # Build allow_patterns. If `since` is given, restrict to date subfolders
-    # whose name is >= since (lexicographic comparison works on ISO YYYY-MM-DD).
-    # We can't filter list_repo_tree-style here, so we just rely on the file
-    # path containing the date and post-filter after download. The download
-    # still benefits from parallelism even if we slightly over-fetch.
+    processed_ids = processed_ids or set()
+
     print(f'Downloading contributions tree (parallel)...')
     # max_workers=4: HF rate-limits per token at ~16+ concurrent requests
     # (HTTP 429 with multi-minute backoff). 4 workers is enough to saturate
@@ -142,27 +151,45 @@ def _hf_list_contributions(since: str | None = None) -> list[dict]:
     contrib_root = Path(snap_dir) / 'contributions'
     if not contrib_root.exists():
         print(f'WARNING: no contributions/ folder found at {contrib_root}')
-        return []
+        return [], [], []
 
-    json_paths = sorted(contrib_root.glob('*/*.json'))
-    if since:
-        json_paths = [p for p in json_paths if p.parent.name >= since]
+    all_paths = sorted(contrib_root.glob('*/*.json'))
+    total_on_disk = len(all_paths)
 
-    print(f'Found {len(json_paths)} contribution files'
-          + (f' since {since}' if since else ''))
+    # Apply watermark + since filters (lexicographic on YYYY-MM-DD date dir).
+    effective_since = max(s for s in (watermark_date, since) if s) if (watermark_date or since) else None
+    json_paths = all_paths
+    if effective_since:
+        json_paths = [p for p in json_paths if p.parent.name >= effective_since]
 
-    contribs = []
+    # Drop already-processed IDs (file stem == contribution_id).
+    json_paths = [p for p in json_paths if p.stem not in processed_ids]
+
+    print(f'Found {total_on_disk} contribution files on HF; '
+          f'{len(json_paths)} new to process'
+          + (f' (since {effective_since})' if effective_since else '')
+          + (f', skipping {len(processed_ids)} already processed' if processed_ids else ''))
+
+    contribs: list[dict] = []
+    new_ids:  list[str]  = []
     for p in json_paths:
         try:
             contribs.append(json.loads(p.read_text(encoding='utf-8')))
+            new_ids.append(p.stem)
         except Exception as e:
             print(f'  SKIP {p.name}: {e}')
 
-    return contribs
+    return contribs, new_ids, all_paths
 
 
-def _hf_load_knowledge() -> dict[str, str]:
-    """Loads the current knowledge.json from HF."""
+def _hf_load_state() -> tuple[dict[str, str], set[str], str]:
+    """
+    Loads the current knowledge.json from HF.
+
+    Returns (knowledge, processed_contribution_ids, watermark_date).
+    Backwards-compatible with old knowledge.json files that lack the
+    processed_contributions / watermark_date fields — both default to empty.
+    """
     try:
         from huggingface_hub import hf_hub_download
         local = hf_hub_download(
@@ -170,32 +197,82 @@ def _hf_load_knowledge() -> dict[str, str]:
             repo_type='dataset', token=HF_TOKEN or None,
         )
         data = json.loads(Path(local).read_text(encoding='utf-8'))
-        return data.get('knowledge', data)
+        knowledge = data.get('knowledge', data) if isinstance(data, dict) else {}
+        if not isinstance(knowledge, dict):
+            knowledge = {}
+        processed = set(data.get('processed_contributions', [])) if isinstance(data, dict) else set()
+        watermark = data.get('watermark_date', '') if isinstance(data, dict) else ''
+        return knowledge, processed, watermark
     except Exception as e:
         print(f'NOTICE: knowledge.json does not exist or error occurred ({e}) — starting from scratch')
-        return {}
+        return {}, set(), ''
 
 
-def _hf_save_knowledge(knowledge: dict[str, str]) -> bool:
-    """Saves knowledge.json to HF Dataset."""
+# Compaction threshold: when processed_contributions grows past this, advance
+# watermark_date to drop the older half (still implicitly considered processed
+# because their date < watermark_date).
+_PROCESSED_COMPACTION_THRESHOLD = 5000
+
+
+def _compact_processed(
+    processed_ids:  set[str],
+    watermark_date: str,
+    seen_paths:     list[Path],
+) -> tuple[list[str], str]:
+    """
+    Advance watermark_date if processed list grows too large.
+
+    Strategy: when list exceeds threshold, sort all known contribution files
+    by date, pick the date at the midpoint as new watermark, drop IDs whose
+    date < new watermark. They're implicitly considered processed because
+    the watermark gates all future runs.
+    """
+    if len(processed_ids) <= _PROCESSED_COMPACTION_THRESHOLD:
+        return sorted(processed_ids), watermark_date
+
+    # Build id → date_dir map from the snapshot we just read.
+    id_to_date = {p.stem: p.parent.name for p in seen_paths}
+    by_date = sorted(
+        ((id_to_date.get(i, ''), i) for i in processed_ids),
+        key=lambda t: t[0],
+    )
+    midpoint = len(by_date) // 2
+    new_watermark = by_date[midpoint][0]
+    if not new_watermark or new_watermark <= watermark_date:
+        # Can't advance — return as-is.
+        return sorted(processed_ids), watermark_date
+
+    kept = [i for d, i in by_date if d >= new_watermark]
+    dropped = len(processed_ids) - len(kept)
+    print(f'[compact] watermark_date {watermark_date or "(none)"} → {new_watermark}; '
+          f'dropped {dropped} ids implicitly covered by watermark')
+    return sorted(kept), new_watermark
+
+
+def _hf_save_state(
+    knowledge:      dict[str, str],
+    processed_ids:  list[str],
+    watermark_date: str,
+) -> bool:
+    """Saves knowledge.json + processed_contributions + watermark_date to HF."""
     try:
         from huggingface_hub import HfApi
         api     = HfApi(token=HF_TOKEN)
-        payload = json.dumps(
-            {
-                'knowledge':  knowledge,
-                'updated_at': datetime.now(UTC).isoformat() + 'Z',
-                'entries':    len(knowledge),
-            },
-            ensure_ascii=False,
-            indent=2,
-        ).encode('utf-8')
+        payload_obj = {
+            'knowledge':                knowledge,
+            'updated_at':               datetime.now(UTC).isoformat() + 'Z',
+            'entries':                  len(knowledge),
+            'processed_contributions':  processed_ids,
+            'watermark_date':           watermark_date,
+        }
+        payload = json.dumps(payload_obj, ensure_ascii=False, indent=2).encode('utf-8')
         api.upload_file(
             path_or_fileobj=payload,
             path_in_repo='knowledge.json',
             repo_id=HF_REPO_ID,
             repo_type='dataset',
-            commit_message=f'admin_merge: {len(knowledge)} entries '
+            commit_message=f'admin_merge: {len(knowledge)} entries, '
+                           f'{len(processed_ids)} tracked '
                            f'({datetime.now(UTC).strftime("%Y-%m-%d %H:%M")} UTC)',
         )
         return True
@@ -353,18 +430,26 @@ Environment variables (.env):
         print(f'Since:    {args.since}')
     print('=' * 60)
 
-    # 1. Load contributions
-    contribs = _hf_list_contributions(since=args.since)
+    # 1. Load current state (knowledge + processed contribution IDs + watermark)
+    existing, processed_ids, watermark = _hf_load_state()
+    print(f'Current knowledge.json: {len(existing)} entries, '
+          f'{len(processed_ids)} tracked contribution IDs, '
+          f'watermark_date={watermark or "(none)"}\n')
+
+    # 2. List contributions, filtered to NEW ones only.
+    contribs, new_ids, all_paths = _hf_list_contributions(
+        processed_ids  = processed_ids,
+        watermark_date = watermark,
+        since          = args.since,
+    )
     if not contribs:
-        print('No contributions found — nothing to do.')
+        print('No new contributions to process — nothing to do.')
+        # Still rewrite knowledge.json in --apply mode to refresh updated_at?
+        # No — would create empty commits on every cron run. Just exit.
         return
 
     confirmed = sum(1 for c in contribs if c.get('confirmed'))
-    print(f'\nLoaded {len(contribs)} contributions ({confirmed} confirmed)\n')
-
-    # 2. Load current knowledge
-    existing = _hf_load_knowledge()
-    print(f'Current knowledge.json: {len(existing)} entries\n')
+    print(f'\nLoaded {len(contribs)} new contributions ({confirmed} confirmed)\n')
 
     # 3. Merge
     merged, report = merge(contribs, existing, min_votes=args.min, verbose=args.verbose)
@@ -391,13 +476,27 @@ Environment variables (.env):
         )
         print(f'\nSaved locally: {args.export}')
 
-    # 6. Apply
+    # 6. Apply — update knowledge + processed_ids + watermark atomically (one commit)
     if args.apply:
-        if new_count == 0 and update_count == 0:
-            print('\nNo changes — knowledge.json will not be overwritten.')
-            return
-        print(f'\nSaving {len(merged)} entries to HF...')
-        ok = _hf_save_knowledge(merged)
+        # Always advance processed_ids in --apply mode, even when the merge
+        # added no new knowledge entries. Otherwise the same contributions
+        # would be reprocessed every run (low-vote SKIPs would be re-evaluated
+        # every time, which is fine but wastes downloads).
+        updated_processed = processed_ids | set(new_ids)
+        compacted_ids, new_watermark = _compact_processed(
+            updated_processed, watermark, all_paths,
+        )
+
+        if new_count == 0 and update_count == 0 and new_watermark == watermark:
+            # Same knowledge, same watermark — still worth writing back to
+            # advance processed_ids so we don't re-pull the same SKIPs.
+            print(f'\nNo knowledge changes, but advancing tracked IDs '
+                  f'({len(processed_ids)} → {len(compacted_ids)})...')
+        else:
+            print(f'\nSaving {len(merged)} entries to HF '
+                  f'(tracked IDs: {len(compacted_ids)}, watermark: {new_watermark or "(none)"})...')
+
+        ok = _hf_save_state(merged, compacted_ids, new_watermark)
         if ok:
             print('OK — knowledge.json updated on HF.')
         else:
