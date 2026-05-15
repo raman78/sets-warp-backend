@@ -98,54 +98,56 @@ HF_REPO_ID = os.environ.get('HF_REPO_ID', 'sets-sto/warp-knowledge')
 # ── HF helpers ─────────────────────────────────────────────────────────────────
 
 def _hf_list_contributions(since: str | None = None) -> list[dict]:
-    """Fetches all contribution JSONs from HF Dataset."""
+    """
+    Fetches all contribution JSONs from HF Dataset.
+
+    Uses snapshot_download with allow_patterns=['contributions/**/*.json'] so
+    that the entire contributions tree is fetched in parallel (8 workers by
+    default) in a single call. PNGs are excluded by the pattern. Subsequent
+    runs reuse the local HF cache, so only new contributions are downloaded
+    on each invocation.
+    """
     if not HF_TOKEN or not HF_REPO_ID:
         print('ERROR: HF_TOKEN or HF_REPO_ID not set', file=sys.stderr)
         sys.exit(1)
     try:
-        from huggingface_hub import HfApi, hf_hub_download
+        from huggingface_hub import snapshot_download
     except ImportError:
         print('ERROR: pip install huggingface-hub', file=sys.stderr)
         sys.exit(1)
 
-    api = HfApi(token=HF_TOKEN)
-    
-    # Optimization: list only the 'contributions/' directory non-recursively
-    try:
-        elements = api.list_repo_tree(HF_REPO_ID, path_in_repo='contributions', repo_type='dataset', recursive=False)
-        folders = [e.path for e in elements if e.type == 'dir']
-        
-        if since:
-            folders = [f for f in folders if f.split('/')[-1] >= since]
-            
-        json_files = []
-        print(f'Scanning {len(folders)} date folders...')
-        for folder in folders:
-            sub_elements = api.list_repo_tree(HF_REPO_ID, path_in_repo=folder, repo_type='dataset', recursive=False)
-            json_files.extend([e.path for e in sub_elements if e.path.endswith('.json')])
-    except Exception as e:
-        print(f'WARNING: list_repo_tree failed: {e}. Falling back to full list (slow).')
-        files = list(api.list_repo_files(HF_REPO_ID, repo_type='dataset'))
-        json_files = [
-            f for f in files
-            if f.startswith('contributions/') and f.endswith('.json')
-        ]
-        if since:
-            json_files = [f for f in json_files if f.split('/')[1] >= since]
+    # Build allow_patterns. If `since` is given, restrict to date subfolders
+    # whose name is >= since (lexicographic comparison works on ISO YYYY-MM-DD).
+    # We can't filter list_repo_tree-style here, so we just rely on the file
+    # path containing the date and post-filter after download. The download
+    # still benefits from parallelism even if we slightly over-fetch.
+    print(f'Downloading contributions tree (parallel)...')
+    snap_dir = snapshot_download(
+        repo_id        = HF_REPO_ID,
+        repo_type      = 'dataset',
+        token          = HF_TOKEN,
+        allow_patterns = ['contributions/**/*.json'],
+        max_workers    = 16,
+    )
 
-    print(f'Found {len(json_files)} contribution files'
+    contrib_root = Path(snap_dir) / 'contributions'
+    if not contrib_root.exists():
+        print(f'WARNING: no contributions/ folder found at {contrib_root}')
+        return []
+
+    json_paths = sorted(contrib_root.glob('*/*.json'))
+    if since:
+        json_paths = [p for p in json_paths if p.parent.name >= since]
+
+    print(f'Found {len(json_paths)} contribution files'
           + (f' since {since}' if since else ''))
 
     contribs = []
-    for i, f in enumerate(json_files):
+    for p in json_paths:
         try:
-            local = hf_hub_download(HF_REPO_ID, f, repo_type='dataset', token=HF_TOKEN)
-            data  = json.loads(Path(local).read_text(encoding='utf-8'))
-            contribs.append(data)
+            contribs.append(json.loads(p.read_text(encoding='utf-8')))
         except Exception as e:
-            print(f'  SKIP {f}: {e}')
-        if (i + 1) % 50 == 0:
-            print(f'  loaded {i + 1}/{len(json_files)}...')
+            print(f'  SKIP {p.name}: {e}')
 
     return contribs
 
@@ -195,6 +197,16 @@ def _hf_save_knowledge(knowledge: dict[str, str]) -> bool:
 
 # ── Merge logic ────────────────────────────────────────────────────────────────
 
+def _is_poison_name(name: str) -> bool:
+    """
+    Names that must NEVER enter knowledge.json:
+      - virtual classes (__empty__, __inactive__, __boff_*) — Stage 0 would
+        hard-override real icons to "empty/inactive" with conf=1.0.
+      - leftover dev-test entries.
+    """
+    return name.startswith('__') or name == 'Test Item Name'
+
+
 def merge(
     contribs:   list[dict],
     existing:   dict[str, str],
@@ -218,6 +230,8 @@ def merge(
         name = c.get('item_name', '').strip()
         if not ph or not name:
             continue
+        if _is_poison_name(name):
+            continue
 
         phash_votes.setdefault(ph, Counter())[name] += 1
         meta = phash_meta.setdefault(ph, {'total': 0, 'confirmed': 0, 'wrong': Counter()})
@@ -228,8 +242,14 @@ def merge(
         if wrong:
             meta['wrong'][wrong] += 1
 
-    merged  = dict(existing)
+    # Drop already-merged poison entries (legacy data from before the filter
+    # existed). This rewrites knowledge.json to a clean state on next merge.
+    merged  = {ph: nm for ph, nm in existing.items() if not _is_poison_name(nm)}
     report  = []
+    _dropped_poison = len(existing) - len(merged)
+    if _dropped_poison > 0:
+        print(f'[clean] dropped {_dropped_poison} legacy poison entries '
+              f'(virtual classes / test rows)')
 
     for ph, votes in sorted(phash_votes.items()):
         winner, count = votes.most_common(1)[0]

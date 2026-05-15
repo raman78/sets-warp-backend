@@ -181,6 +181,15 @@ async def contribute(req: ContributeRequest, request: Request):
     if not is_valid_crop(png_bytes):
         raise HTTPException(400, 'Crop rejected: image too uniform or invalid')
 
+    # Reject poison labels at ingress — virtual classes (__empty__,
+    # __inactive__, __boff_*) and leftover dev-test entries must never
+    # reach storage. They previously polluted knowledge.json and caused
+    # Stage 0 to hard-override real icons to "empty/inactive" at conf=1.0.
+    _name = (req.item_name or '').strip()
+    if _name.startswith('__') or _name == 'Test Item Name':
+        raise HTTPException(400, f'Crop rejected: label {_name!r} not eligible '
+                                 f'for community knowledge')
+
     contrib_id  = hashlib.sha256(
         f'{req.install_id}{req.phash}{req.timestamp}'.encode()
     ).hexdigest()[:16]
