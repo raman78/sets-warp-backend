@@ -128,12 +128,15 @@ def _hf_list_contributions(since: str | None = None) -> list[dict]:
     # path containing the date and post-filter after download. The download
     # still benefits from parallelism even if we slightly over-fetch.
     print(f'Downloading contributions tree (parallel)...')
+    # max_workers=4: HF rate-limits per token at ~16+ concurrent requests
+    # (HTTP 429 with multi-minute backoff). 4 workers is enough to saturate
+    # bandwidth for tiny JSON contributions without tripping the limiter.
     snap_dir = snapshot_download(
         repo_id        = HF_REPO_ID,
         repo_type      = 'dataset',
         token          = HF_TOKEN,
         allow_patterns = ['contributions/**/*.json'],
-        max_workers    = 16,
+        max_workers    = 4,
     )
 
     contrib_root = Path(snap_dir) / 'contributions'
