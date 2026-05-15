@@ -42,7 +42,13 @@ def _ensure_venv():
          - creates .venv from that Python
          - installs requirements.txt (including huggingface-hub)
        Then restart in the ready .venv
+
+    CI environments (GitHub Actions etc.) skip this — they install
+    dependencies via workflow steps and run with system Python.
     """
+    if os.environ.get('CI') or os.environ.get('GITHUB_ACTIONS') or os.environ.get('WARP_NO_VENV'):
+        return
+
     here     = Path(__file__).resolve().parent
     is_win   = sys.platform == 'win32'
     venv_py  = here / ('.venv/Scripts/python.exe' if is_win else '.venv/bin/python')
