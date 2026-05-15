@@ -1,0 +1,57 @@
+# .github/workflows/merge_knowledge.yml
+#
+# Automated WARP Knowledge Merge — GitHub Actions
+# ================================================
+# Runs every 2 hours. Pulls confirmed contributions from HF
+# (sets-sto/warp-knowledge/contributions/), runs majority vote per
+# pHash, and uploads merged knowledge.json back to HF.
+#
+# Cheap operation — downloads small JSON files, no training.
+# GitHub Actions for PUBLIC repos = unlimited free minutes.
+#
+# SETUP (one-time):
+#   GitHub repo → Settings → Secrets and variables → Actions → New secret:
+#     HF_TOKEN   = <your HF write token>
+#
+# Optional secret (if HF repo differs from default):
+#     HF_REPO_ID = sets-sto/warp-knowledge
+
+name: Merge Knowledge
+
+on:
+  schedule:
+    - cron: '0 */2 * * *'   # every 2 hours
+  workflow_dispatch:          # allow manual trigger from GitHub UI
+    inputs:
+      min_votes:
+        description: 'Minimum vote count for a pHash to merge (existing entries)'
+        required: false
+        default: '1'
+        type: string
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --quiet huggingface_hub requests
+
+      - name: Merge contributions into knowledge.json
+        env:
+          HF_TOKEN:   ${{ secrets.HF_TOKEN }}
+          HF_REPO_ID: ${{ secrets.HF_REPO_ID || 'sets-sto/warp-knowledge' }}
+        run: |
+          MIN_VOTES="${{ github.event.inputs.min_votes || '1' }}"
+          python admin_merge.py --apply --min "$MIN_VOTES"
