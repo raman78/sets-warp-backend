@@ -1,0 +1,85 @@
+# .github/workflows/train_metric_model.yml
+#
+# Metric-learning trainer (ArcFace + EfficientNet-B0 + k-NN gallery).
+# Runs alongside train_central_model.yml — outputs a separate icon_embedder.pt
+# next to the softmax icon_classifier.pt on HF, so WARP can A/B test or fall
+# back to either model at inference time.
+#
+# Default: manual trigger only (workflow_dispatch). The softmax workflow runs
+# hourly; we don't want metric training competing for the same crops in flight.
+# Once the metric model proves out, switch to a daily cron.
+#
+# SETUP: same HF_TOKEN secret as the softmax workflow.
+
+name: Train Metric Model (ArcFace)
+
+on:
+  workflow_dispatch:
+    inputs:
+      warm_start_from_classifier:
+        description: 'Warm-start backbone from existing icon_classifier.pt'
+        required: false
+        default: 'true'
+        type: boolean
+  # schedule:
+  #   - cron: '15 3 * * *'   # daily at 03:15 UTC — enable once stable
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Cache Hugging Face downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-crops-${{ github.sha }}
+          restore-keys: |
+            hf-crops-
+
+      - name: Install dependencies
+        run: |
+          pip install --quiet \
+            torch torchvision \
+            --index-url https://download.pytorch.org/whl/cpu
+          pip install --quiet \
+            opencv-python-headless \
+            huggingface_hub
+
+      - name: Train metric embedder and publish to HF
+        env:
+          HF_TOKEN:   ${{ secrets.HF_TOKEN }}
+          HF_DATASET: ${{ secrets.HF_DATASET || 'sets-sto/sto-icon-dataset' }}
+          HF_REPO_ID: ${{ secrets.HF_REPO_ID || 'sets-sto/warp-knowledge' }}
+        run: |
+          # Output goes to a temp dir on the runner — admin_train_metric.py
+          # then uploads to HF via --upload.
+          mkdir -p /tmp/warp_metric_out
+          WARM_FLAG=""
+          if [ "${{ github.event.inputs.warm_start_from_classifier }}" = "true" ]; then
+            # Pull the current softmax model so the embedder can warm-start
+            # from its backbone weights instead of ImageNet.
+            python -c "
+          from huggingface_hub import hf_hub_download
+          import os, shutil
+          local = hf_hub_download(
+              os.environ['HF_REPO_ID'], 'models/icon_classifier.pt',
+              repo_type='dataset', token=os.environ['HF_TOKEN'],
+          )
+          shutil.copy(local, '/tmp/warp_metric_out/icon_classifier.pt')
+          print('Warm-start file copied:', local)
+          "
+            WARM_FLAG="--warm-start-from /tmp/warp_metric_out/icon_classifier.pt"
+          fi
+          python admin_train_metric.py --train --upload --min 1 \
+            --out /tmp/warp_metric_out $WARM_FLAG
