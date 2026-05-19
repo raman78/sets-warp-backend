@@ -1,0 +1,50 @@
+# .github/workflows/merge_crops.yml
+#
+# Automated WARP Crop Dataset Merge — GitHub Actions
+# ====================================================
+# Runs every 2 hours. Pulls staging contributions from
+# sets-sto/sto-icon-dataset, runs majority vote per crop_sha256, and
+# publishes the winners to data/annotations.jsonl + data/crops/.
+#
+# Companion to merge_knowledge.yml (which handles the phash side on
+# sets-sto/warp-knowledge). Both rely on the same HF_TOKEN secret.
+
+name: Merge Crops
+
+on:
+  schedule:
+    - cron: '15 */2 * * *'   # every 2 hours, offset 15min from merge_knowledge
+  workflow_dispatch:
+    inputs:
+      min_votes:
+        description: 'Minimum vote count for an existing sha to be updated'
+        required: false
+        default: '2'
+        type: string
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --quiet huggingface_hub
+
+      - name: Merge staging contributions into data/
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          WARP_NO_VENV: '1'
+        run: |
+          MIN_VOTES="${{ github.event.inputs.min_votes || '2' }}"
+          python democratic_merge_crops.py --apply --min "$MIN_VOTES"
