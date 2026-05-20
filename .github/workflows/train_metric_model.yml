@@ -21,8 +21,8 @@ on:
         required: false
         default: 'true'
         type: boolean
-  # schedule:
-  #   - cron: '15 3 * * *'   # daily at 03:15 UTC — enable once stable
+  schedule:
+    - cron: '15 3 * * *'   # daily at 03:15 UTC
 
 jobs:
   train:
