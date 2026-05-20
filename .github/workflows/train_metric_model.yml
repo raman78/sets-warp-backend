@@ -22,7 +22,7 @@ on:
         default: 'true'
         type: boolean
   schedule:
-    - cron: '15 3 * * *'   # daily at 03:15 UTC
+    - cron: '45 0 * * *'   # daily at 00:45 UTC (safe window, avoids collision with main model)
 
 jobs:
   train:
@@ -43,9 +43,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: hf-crops-${{ github.sha }}
+          key: hf-crops-metric-${{ github.sha }}
           restore-keys: |
-            hf-crops-
+            hf-crops-metric-
 
       - name: Install dependencies
         run: |
