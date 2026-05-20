@@ -107,7 +107,7 @@ def _load_existing(api, token: str) -> dict[str, dict]:
 
 
 def _collect_votes(
-    api, token: str, since: str | None,
+    api, token: str, since: str | None, repo_files: set[str],
 ) -> tuple[dict[str, Counter], dict[str, Counter], dict[str, str], dict[str, int]]:
     """
     Fetch all staging annotations and tally votes.
@@ -125,7 +125,7 @@ def _collect_votes(
         repo_id        = REPO,
         repo_type      = RTYPE,
         token          = token,
-        allow_patterns = ['staging/**/annotations.jsonl', 'staging/**/crops/*.png'],
+        allow_patterns = ['staging/**/annotations.jsonl'],
         max_workers    = 4,
     )
     root = Path(snap_dir) / 'staging'
@@ -141,16 +141,12 @@ def _collect_votes(
     crop_src:   dict[str, str]     = {}
     per_install: dict[str, int]    = {}
 
+    for f in repo_files:
+        if f.startswith('staging/') and f.endswith('.png'):
+            crop_src.setdefault(Path(f).stem, f)
+
     for af in anno_files:
         install_id = af.parent.name
-        # Pre-index this contributor's crops once.
-        crops_dir = af.parent / 'crops'
-        if crops_dir.exists():
-            for png in crops_dir.glob('*.png'):
-                crop_src.setdefault(
-                    png.stem,
-                    f'staging/{install_id}/crops/{png.name}',
-                )
 
         seen_in_install: set[tuple[str, str, str]] = set()
         n_entries = 0
@@ -371,7 +367,7 @@ def main() -> int:
     print(f'Existing data/annotations.jsonl: {len(existing)} entries')
 
     name_votes, slot_votes, crop_src, per_install = _collect_votes(
-        api, args.token, since=args.since)
+        api, args.token, since=args.since, repo_files=repo_files)
     print(f'Contributors: {len(per_install)}   '
           f'unique sha hashes voted on: {len(name_votes)}')
 
