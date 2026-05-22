@@ -120,11 +120,11 @@ def _collect_votes(
     """
     from hf_clone import clone_hf_shallow
 
-    print('Cloning staging tree (shallow, sparse)…')
-    # Sparse-checkout staging/ only — repo also contains data/crops/*.png
-    # which this function does not need (those are fetched on demand later
-    # via hf_hub_download).
-    snap_dir = clone_hf_shallow(REPO, token, repo_type=RTYPE, paths=['staging'])
+    print('Cloning staging tree (shallow)…')
+    # Full shallow clone. data/crops/*.png are LFS-tracked on HF, so
+    # GIT_LFS_SKIP_SMUDGE inside the helper keeps them as ~150B pointer
+    # files — no large blob transfer.
+    snap_dir = clone_hf_shallow(REPO, token, repo_type=RTYPE)
     root = Path(snap_dir) / 'staging'
     if not root.exists():
         print(f'WARNING: no staging/ folder at {root}')

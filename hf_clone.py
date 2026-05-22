@@ -21,6 +21,10 @@ LFS:
     GIT_LFS_SKIP_SMUDGE=1 is forced — LFS pointer files are kept, blobs
     are not fetched. Callers that need binary LFS content must download
     those individually via hf_hub_download afterwards.
+
+    Partial-clone (`--filter=blob:none`) is NOT used: HF's git server
+    rejects promisor-remote fetches ("fatal: expected 'packfile'"), so
+    callers that want to skip large binaries must rely on LFS instead.
 """
 
 from __future__ import annotations
@@ -35,18 +39,9 @@ def clone_hf_shallow(
     repo_id:   str,
     token:     str,
     repo_type: str = 'dataset',
-    paths:     list[str] | None = None,
 ) -> Path:
     """
     Shallow-clone (or fast-forward) a HF Hub repo to a stable cache dir.
-
-    Args:
-      repo_id:   e.g. 'sets-sto/warp-knowledge'
-      token:     HF token (Bearer)
-      repo_type: 'dataset' | 'model' | 'space'
-      paths:     if given, restrict checkout to these top-level paths via
-                 sparse-checkout (saves bandwidth when the repo also
-                 contains large blobs the caller does not need).
 
     Returns the working-tree Path.
     """
@@ -69,33 +64,19 @@ def clone_hf_shallow(
         subprocess.run(['git', *args], check=True, env=env,
                        cwd=str(cwd) if cwd else None)
 
-    use_sparse = bool(paths)
-
     if (cache_dir / '.git').exists():
-        # Existing clone — fetch + reset to remote HEAD.
         _git(['-c', f'http.extraHeader={auth_header}',
               'fetch', '--depth', '1', 'origin', 'HEAD'],
              cwd=cache_dir)
-        if use_sparse:
-            _git(['sparse-checkout', 'set', *paths], cwd=cache_dir)
         _git(['reset', '--hard', 'FETCH_HEAD'], cwd=cache_dir)
         return cache_dir
 
-    # Fresh clone.
     if cache_dir.exists():
         shutil.rmtree(cache_dir)
 
-    clone_args = ['-c', f'http.extraHeader={auth_header}',
-                  'clone', '--depth', '1', '--single-branch']
-    if use_sparse:
-        # --filter=blob:none defers blob download; sparse-checkout then
-        # only materialises blobs under the requested paths.
-        clone_args += ['--filter=blob:none', '--sparse']
-    clone_args += [remote_url, str(cache_dir)]
-    _git(clone_args)
-
-    if use_sparse:
-        _git(['sparse-checkout', 'set', *paths], cwd=cache_dir)
+    _git(['-c', f'http.extraHeader={auth_header}',
+          'clone', '--depth', '1', '--single-branch',
+          remote_url, str(cache_dir)])
 
     return cache_dir
 
