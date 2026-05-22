@@ -111,8 +111,9 @@ def _hf_list_contributions(
     """
     Fetches contribution JSONs from HF Dataset.
 
-    Uses snapshot_download with allow_patterns=['contributions/**/*.json']
-    (cached locally, so unchanged files are just etag-checked, not re-downloaded).
+    Uses a shallow git clone of the HF dataset repo (see hf_clone.py) —
+    one network round-trip instead of per-file HEAD requests, which avoids
+    HF's HTTP 429 limiter as the tree grows.
 
     Returns (contribs, new_ids, all_paths) where:
       - contribs: parsed JSON records for contributions NOT in processed_ids
@@ -121,32 +122,16 @@ def _hf_list_contributions(
         in the same order.
       - all_paths: every contribution file path on disk (regardless of
         filters). Used by compaction to map id → date.
-
-    Filtering happens AFTER snapshot — the local HF cache handles re-fetch
-    avoidance, so over-fetching is essentially free on subsequent runs.
     """
     if not HF_TOKEN or not HF_REPO_ID:
         print('ERROR: HF_TOKEN or HF_REPO_ID not set', file=sys.stderr)
         sys.exit(1)
-    try:
-        from huggingface_hub import snapshot_download
-    except ImportError:
-        print('ERROR: pip install huggingface-hub', file=sys.stderr)
-        sys.exit(1)
 
     processed_ids = processed_ids or set()
 
-    print(f'Downloading contributions tree (parallel)...')
-    # max_workers=4: HF rate-limits per token at ~16+ concurrent requests
-    # (HTTP 429 with multi-minute backoff). 4 workers is enough to saturate
-    # bandwidth for tiny JSON contributions without tripping the limiter.
-    snap_dir = snapshot_download(
-        repo_id        = HF_REPO_ID,
-        repo_type      = 'dataset',
-        token          = HF_TOKEN,
-        allow_patterns = ['contributions/**/*.json'],
-        max_workers    = 4,
-    )
+    print(f'Cloning contributions tree (shallow)...')
+    from hf_clone import clone_hf_shallow
+    snap_dir = clone_hf_shallow(HF_REPO_ID, HF_TOKEN, repo_type='dataset')
 
     contrib_root = Path(snap_dir) / 'contributions'
     if not contrib_root.exists():

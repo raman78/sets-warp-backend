@@ -118,16 +118,13 @@ def _collect_votes(
       - crop_src[sha]          → first staging path that has this crop PNG
       - per_install[install_id]→ number of entries contributed by that install
     """
-    from huggingface_hub import snapshot_download
+    from hf_clone import clone_hf_shallow
 
-    print('Downloading staging tree (parallel)…')
-    snap_dir = snapshot_download(
-        repo_id        = REPO,
-        repo_type      = RTYPE,
-        token          = token,
-        allow_patterns = ['staging/**/annotations.jsonl'],
-        max_workers    = 4,
-    )
+    print('Cloning staging tree (shallow, sparse)…')
+    # Sparse-checkout staging/ only — repo also contains data/crops/*.png
+    # which this function does not need (those are fetched on demand later
+    # via hf_hub_download).
+    snap_dir = clone_hf_shallow(REPO, token, repo_type=RTYPE, paths=['staging'])
     root = Path(snap_dir) / 'staging'
     if not root.exists():
         print(f'WARNING: no staging/ folder at {root}')
