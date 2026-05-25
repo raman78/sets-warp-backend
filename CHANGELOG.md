@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **Phase 1 — backend-proxy bulk endpoints.** Added `POST /contribute/bulk-crops`, `POST /upload/screen-types`, `POST /upload/anchors` to `main.py`. Each accepts a batch (≤50 crops / ≤20 screens / ≤20 grids) and produces a single HF commit to `sets-sto/sto-icon-dataset` (configurable via `HF_ICONS_REPO_ID`). These let the `sto-warp` client drop its write-scoped HF token in Phase 2 — uploads will flow through the backend's server-side token instead. Mirrors validation + last-wins jsonl dedup from `warp/trainer/sync.py`.
 - Created agent guidelines (`CLAUDE.md`, `GEMINI.md`, `GPT.md`) to standardize AI assistant behavior.
 - Added `/docs` directory with `technical_overview.md` and `user_guide.md`.
 - Added `_load_env()` to `main.py` for seamless local development with `.env` files.
