@@ -178,10 +178,13 @@ class ScreenTypesRequest(BaseModel):
 
 
 class _AnchorGrid(BaseModel):
-    build_type: str            = Field(..., min_length=1, max_length=40)
-    aspect:     str | None     = Field(None, max_length=16)
-    resolution: str            = Field('', max_length=16)
-    slots:      dict[str, list[float]] = Field(..., min_length=3)
+    # Mirrors the on-disk format produced by warp/trainer/sync.py reading
+    # anchors.json: aspect is a float, each slot is a bbox dict with relative
+    # coords (x0_rel/y_rel/w_rel/h_rel) plus optional step_rel/count.
+    build_type: str                          = Field(..., min_length=1, max_length=40)
+    aspect:     float | None                 = Field(None)
+    resolution: str                          = Field('', max_length=16)
+    slots:      dict[str, dict[str, float]]  = Field(..., min_length=3)
 
 
 class AnchorsRequest(BaseModel):
@@ -473,10 +476,12 @@ async def upload_anchors(req: AnchorsRequest, request: Request):
             rejected += 1
             reasons.append('fewer than 3 slots')
             continue
-        # Each bbox must be [x, y, w, h] (4 floats); guard against malformed payloads.
-        if any(len(v) != 4 for v in slots.values()):
+        # Each bbox must carry the four relative coords; extra keys (step_rel,
+        # count) are preserved for downstream consumers.
+        _REQUIRED_BBOX_KEYS = ('x0_rel', 'y_rel', 'w_rel', 'h_rel')
+        if any(not all(k in v for k in _REQUIRED_BBOX_KEYS) for v in slots.values()):
             rejected += 1
-            reasons.append('bbox not 4-tuple')
+            reasons.append('bbox missing required keys')
             continue
 
         payload = {
