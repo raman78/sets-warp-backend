@@ -180,11 +180,14 @@ class ScreenTypesRequest(BaseModel):
 class _AnchorGrid(BaseModel):
     # Mirrors the on-disk format produced by warp/trainer/sync.py reading
     # anchors.json: aspect is a float, each slot is a bbox dict with relative
-    # coords (x0_rel/y_rel/w_rel/h_rel) plus optional step_rel/count.
-    build_type: str                          = Field(..., min_length=1, max_length=40)
-    aspect:     float | None                 = Field(None)
-    resolution: str                          = Field('', max_length=16)
-    slots:      dict[str, dict[str, float]]  = Field(..., min_length=3)
+    # coords (x0_rel/y_rel/w_rel/h_rel) plus optional step_rel/count, and
+    # for multi-run slots (BOFF abilities split across rows) an extra
+    # 'runs' list of sub-bbox dicts. Value type is Any to accommodate that
+    # mix; required-key validation happens in the endpoint.
+    build_type: str                        = Field(..., min_length=1, max_length=40)
+    aspect:     float | None               = Field(None)
+    resolution: str                        = Field('', max_length=16)
+    slots:      dict[str, dict[str, Any]]  = Field(..., min_length=3)
 
 
 class AnchorsRequest(BaseModel):
