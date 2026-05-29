@@ -480,9 +480,21 @@ async def upload_anchors(req: AnchorsRequest, request: Request):
             reasons.append('fewer than 3 slots')
             continue
         # Each bbox must carry the four relative coords; extra keys (step_rel,
-        # count) are preserved for downstream consumers.
-        _REQUIRED_BBOX_KEYS = ('x0_rel', 'y_rel', 'w_rel', 'h_rel')
-        if any(not all(k in v for k in _REQUIRED_BBOX_KEYS) for v in slots.values()):
+        # count) are preserved for downstream consumers. Multi-column slots use
+        # a nested {y_rel, w_rel, h_rel, runs:[{x0_rel, ...}, ...]} shape where
+        # x0_rel lives inside each run instead of at the top level.
+        def _bbox_ok(v: dict) -> bool:
+            if not isinstance(v, dict):
+                return False
+            if not all(k in v for k in ('y_rel', 'w_rel', 'h_rel')):
+                return False
+            if 'x0_rel' in v:
+                return True
+            runs = v.get('runs')
+            return isinstance(runs, list) and len(runs) > 0 and all(
+                isinstance(r, dict) and 'x0_rel' in r for r in runs
+            )
+        if any(not _bbox_ok(v) for v in slots.values()):
             rejected += 1
             reasons.append('bbox missing required keys')
             continue
