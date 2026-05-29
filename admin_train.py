@@ -435,13 +435,35 @@ def collect_text_corrections(staging_folders: list[str], models_dir: Path) -> No
       - 1 vote per install_id
       - majority winner per ml_name key → corrections dict
     Uploads to HF as models/ship_type_corrections.json.
+
+    Ship Tier has a closed 11-entry vocabulary, so we filter aggressively:
+    any vote where the OCR key is already a canonical tier (e.g.
+    'T6-X2' → 'T1') is dropped — that pair can only come from a
+    misannotated tier crop and would poison every client until the next
+    train cycle. Same for non-tier-shaped keys mapping to a tier.
     """
     from huggingface_hub import HfApi, CommitOperationAdd
 
     _TEXT_LEARNING_SLOTS = {'Ship Type', 'Ship Tier'}
+    _CANONICAL_TIERS = frozenset({
+        'T1', 'T2', 'T3', 'T4', 'T5', 'T5-U', 'T5-X', 'T5-X2',
+        'T6', 'T6-X', 'T6-X2',
+    })
+
+    def _is_tier_poison(key: str, val: str) -> bool:
+        # valid → anything = always poison (OCR already nailed it).
+        if key in _CANONICAL_TIERS:
+            return True
+        # garbage → tier is fine ('IT6-X21' → 'T6-X2'), but only when key
+        # is tier-shaped: short, no whitespace. Ship-name → tier is a
+        # category cross-over, always wrong.
+        if val in _CANONICAL_TIERS and (' ' in key or len(key) > 12):
+            return True
+        return False
 
     # ml_name -> {install_id -> corrected_name}
     votes: dict[str, dict[str, str]] = defaultdict(dict)
+    rejected = 0
 
     for iid in staging_folders:
         anns = _load_staging_annotations(iid)
@@ -450,8 +472,15 @@ def collect_text_corrections(staging_folders: list[str], models_dir: Path) -> No
                 continue
             ml_name = entry.get('ml_name', '').strip()
             name    = entry.get('name', '').strip()
-            if ml_name and name and ml_name != name:
-                votes[ml_name][iid] = name  # 1 install_id = 1 vote
+            if not (ml_name and name and ml_name != name):
+                continue
+            if _is_tier_poison(ml_name, name):
+                rejected += 1
+                continue
+            votes[ml_name][iid] = name  # 1 install_id = 1 vote
+
+    if rejected:
+        print(f'  Rejected {rejected} tier-poison vote(s) at ingest.')
 
     if not votes:
         print('  No OCR correction pairs found — ship_type_corrections.json not updated.')
@@ -461,6 +490,10 @@ def collect_text_corrections(staging_folders: list[str], models_dir: Path) -> No
     for ml_name, iid_votes in votes.items():
         label_counts = Counter(iid_votes.values())
         winner, _ = label_counts.most_common(1)[0]
+        # Re-check after majority vote in case a poisoned target won the
+        # ballot (e.g. ml_name 'T6-X' with a 1-vote 'T1' override).
+        if _is_tier_poison(ml_name, winner):
+            continue
         corrections[ml_name] = winner
 
     print(f'  Built {len(corrections)} OCR correction(s).')
