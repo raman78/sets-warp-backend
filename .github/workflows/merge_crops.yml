@@ -13,7 +13,7 @@ name: Merge Crops
 
 on:
   schedule:
-    - cron: '15 */2 * * *'   # every 2 hours, offset 15min from merge_knowledge
+    - cron: '22 */2 * * *'   # every 2 hours, off-peak offset (15min after merge_knowledge)
   workflow_dispatch:
     inputs:
       min_votes:

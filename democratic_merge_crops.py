@@ -41,6 +41,7 @@ import io
 import json
 import os
 import sys
+import time
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 UTC = timezone.utc
@@ -355,10 +356,24 @@ def main() -> int:
     print('=' * 64)
 
     from huggingface_hub import HfApi
+    from huggingface_hub.errors import HfHubHTTPError
     api = HfApi(token=args.token)
 
     print('Listing repo files…')
-    repo_files = set(api.list_repo_files(repo_id=REPO, repo_type=RTYPE))
+    # HF rate-limits shared CI IPs even with a valid token — retry 429 with
+    # exponential backoff instead of dying on the first hit.
+    for attempt in range(5):
+        try:
+            repo_files = set(api.list_repo_files(repo_id=REPO, repo_type=RTYPE))
+            break
+        except HfHubHTTPError as e:
+            status = getattr(getattr(e, 'response', None), 'status_code', None)
+            if status != 429 or attempt == 4:
+                raise
+            delay = 2 ** attempt
+            print(f'  HF 429 on list_repo_files (attempt {attempt + 1}/5) — '
+                  f'sleeping {delay}s', file=sys.stderr)
+            time.sleep(delay)
 
     existing = _load_existing(api, args.token)
     print(f'Existing data/annotations.jsonl: {len(existing)} entries')

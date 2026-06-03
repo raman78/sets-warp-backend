@@ -32,6 +32,8 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 
@@ -64,19 +66,38 @@ def clone_hf_shallow(
         subprocess.run(['git', *args], check=True, env=env,
                        cwd=str(cwd) if cwd else None)
 
+    # HF rate-limits shared CI IPs (429) even with a valid token. git surfaces
+    # that as a non-zero exit, so retry the network step with exponential
+    # backoff; everything else (bad token, missing repo) still fails fast on
+    # the last attempt.
+    def _git_with_retry(args: list[str], cwd: Path | None = None,
+                        label: str = 'git') -> None:
+        for attempt in range(5):
+            try:
+                _git(args, cwd=cwd)
+                return
+            except subprocess.CalledProcessError:
+                if attempt == 4:
+                    raise
+                delay = 2 ** attempt
+                print(f'  HF {label} failed (attempt {attempt + 1}/5) — '
+                      f'sleeping {delay}s', file=sys.stderr)
+                time.sleep(delay)
+
     if (cache_dir / '.git').exists():
-        _git(['-c', f'http.extraHeader={auth_header}',
-              'fetch', '--depth', '1', 'origin', 'HEAD'],
-             cwd=cache_dir)
+        _git_with_retry(['-c', f'http.extraHeader={auth_header}',
+                         'fetch', '--depth', '1', 'origin', 'HEAD'],
+                        cwd=cache_dir, label='fetch')
         _git(['reset', '--hard', 'FETCH_HEAD'], cwd=cache_dir)
         return cache_dir
 
     if cache_dir.exists():
         shutil.rmtree(cache_dir)
 
-    _git(['-c', f'http.extraHeader={auth_header}',
-          'clone', '--depth', '1', '--single-branch',
-          remote_url, str(cache_dir)])
+    _git_with_retry(['-c', f'http.extraHeader={auth_header}',
+                     'clone', '--depth', '1', '--single-branch',
+                     remote_url, str(cache_dir)],
+                    label='clone')
 
     return cache_dir
 
