@@ -68,20 +68,24 @@ def clone_hf_shallow(
 
     # HF rate-limits shared CI IPs (429) even with a valid token. git surfaces
     # that as a non-zero exit, so retry the network step with exponential
-    # backoff; everything else (bad token, missing repo) still fails fast on
-    # the last attempt.
+    # backoff; everything else (bad token, missing repo) wastes a few cycles
+    # before failing on the last attempt.
+    #
+    # Schedule must outlive HF's 60-120 s throttle window — see hf_retry.py.
+    import random
+    _delays = (60, 120, 240, 480, 480)
     def _git_with_retry(args: list[str], cwd: Path | None = None,
                         label: str = 'git') -> None:
-        for attempt in range(5):
+        for attempt, base in enumerate(_delays):
             try:
                 _git(args, cwd=cwd)
                 return
             except subprocess.CalledProcessError:
-                if attempt == 4:
+                if attempt == len(_delays) - 1:
                     raise
-                delay = 2 ** attempt
-                print(f'  HF {label} failed (attempt {attempt + 1}/5) — '
-                      f'sleeping {delay}s', file=sys.stderr)
+                delay = max(1.0, base + random.uniform(-15, 15))
+                print(f'  HF {label} failed (attempt {attempt + 1}/{len(_delays)}) — '
+                      f'sleeping {delay:.0f}s', file=sys.stderr, flush=True)
                 time.sleep(delay)
 
     if (cache_dir / '.git').exists():

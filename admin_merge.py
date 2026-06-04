@@ -177,9 +177,15 @@ def _hf_load_state() -> tuple[dict[str, str], set[str], str]:
     """
     try:
         from huggingface_hub import hf_hub_download
-        local = hf_hub_download(
-            HF_REPO_ID, 'knowledge.json',
-            repo_type='dataset', token=HF_TOKEN or None,
+        from hf_retry import retry_on_429
+        # Wrap the download so a transient HF 429 doesn't fall into the
+        # "starting from scratch" branch and overwrite a good knowledge.json.
+        local = retry_on_429(
+            lambda: hf_hub_download(
+                HF_REPO_ID, 'knowledge.json',
+                repo_type='dataset', token=HF_TOKEN or None,
+            ),
+            label='hf_hub_download(knowledge.json)',
         )
         data = json.loads(Path(local).read_text(encoding='utf-8'))
         knowledge = data.get('knowledge', data) if isinstance(data, dict) else {}

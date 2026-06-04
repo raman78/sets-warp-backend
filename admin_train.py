@@ -106,10 +106,15 @@ def _list_staging_folders() -> list[str]:
     """Return list of install_id staging folder names."""
     from huggingface_hub import HfApi
     from huggingface_hub.hf_api import RepoFolder
+    from hf_retry import retry_on_429
     api   = HfApi(token=HF_TOKEN)
     try:
         # Optimization: list only the 'staging/' directory non-recursively
-        elements = api.list_repo_tree(HF_DATASET, path_in_repo='staging', repo_type='dataset', recursive=False)
+        elements = retry_on_429(
+            lambda: list(api.list_repo_tree(HF_DATASET, path_in_repo='staging',
+                                            repo_type='dataset', recursive=False)),
+            label="list_repo_tree('staging')",
+        )
         folders = [e.path.split('/')[-1] for e in elements if isinstance(e, RepoFolder)]
         if folders:
             return sorted(folders)
@@ -117,7 +122,10 @@ def _list_staging_folders() -> list[str]:
         log.warning(f"list_repo_tree('staging') failed: {e}. Falling back to full list.")
 
     # Fallback to the old method (might timeout on large repos)
-    files = list(api.list_repo_files(HF_DATASET, repo_type='dataset'))
+    files = retry_on_429(
+        lambda: list(api.list_repo_files(HF_DATASET, repo_type='dataset')),
+        label='list_repo_files(fallback)',
+    )
     folders = {
         f.split('/')[1]
         for f in files
