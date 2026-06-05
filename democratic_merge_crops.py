@@ -40,8 +40,8 @@ import argparse
 import io
 import json
 import os
+import subprocess
 import sys
-import time
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 UTC = timezone.utc
@@ -81,16 +81,15 @@ def _is_poison_name(name: str) -> bool:
     return name.startswith('__') or name == 'Test Item Name'
 
 
-def _load_existing(api, token: str) -> dict[str, dict]:
-    """Load current data/annotations.jsonl → dict keyed by crop_sha256."""
-    from huggingface_hub import hf_hub_download
+def _load_existing(snap_dir) -> dict[str, dict]:
+    """Load current data/annotations.jsonl → dict keyed by crop_sha256.
+
+    Reads from the local shallow clone — avoids an extra HF resolve request.
+    """
     out: dict[str, dict] = {}
-    try:
-        local = hf_hub_download(
-            repo_id=REPO, filename=DATA_ANN, repo_type=RTYPE, token=token)
-    except Exception as e:
-        print(f'NOTICE: data/annotations.jsonl does not exist ({e}) '
-              f'— starting from scratch')
+    local = Path(snap_dir) / DATA_ANN
+    if not local.exists():
+        print(f'NOTICE: {DATA_ANN} not in clone — starting from scratch')
         return out
     with open(local, encoding='utf-8') as f:
         for line in f:
@@ -108,10 +107,10 @@ def _load_existing(api, token: str) -> dict[str, dict]:
 
 
 def _collect_votes(
-    api, token: str, since: str | None, repo_files: set[str],
+    snap_dir, since: str | None, repo_files: set[str],
 ) -> tuple[dict[str, Counter], dict[str, Counter], dict[str, str], dict[str, int]]:
     """
-    Fetch all staging annotations and tally votes.
+    Tally votes from staging annotations in the local shallow clone.
 
     Returns (name_votes, slot_votes, crop_src, per_install):
       - name_votes[sha][name]  → count of distinct install_ids voting for name
@@ -119,13 +118,6 @@ def _collect_votes(
       - crop_src[sha]          → first staging path that has this crop PNG
       - per_install[install_id]→ number of entries contributed by that install
     """
-    from hf_clone import clone_hf_shallow
-
-    print('Cloning staging tree (shallow)…')
-    # Full shallow clone. data/crops/*.png are LFS-tracked on HF, so
-    # GIT_LFS_SKIP_SMUDGE inside the helper keeps them as ~150B pointer
-    # files — no large blob transfer.
-    snap_dir = clone_hf_shallow(REPO, token, repo_type=RTYPE)
     root = Path(snap_dir) / 'staging'
     if not root.exists():
         print(f'WARNING: no staging/ folder at {root}')
@@ -356,30 +348,26 @@ def main() -> int:
     print('=' * 64)
 
     from huggingface_hub import HfApi
-    from huggingface_hub.errors import HfHubHTTPError
     api = HfApi(token=args.token)
 
-    print('Listing repo files…')
-    # HF rate-limits shared CI IPs even with a valid token — retry 429 with
-    # exponential backoff instead of dying on the first hit.
-    for attempt in range(5):
-        try:
-            repo_files = set(api.list_repo_files(repo_id=REPO, repo_type=RTYPE))
-            break
-        except HfHubHTTPError as e:
-            status = getattr(getattr(e, 'response', None), 'status_code', None)
-            if status != 429 or attempt == 4:
-                raise
-            delay = 2 ** attempt
-            print(f'  HF 429 on list_repo_files (attempt {attempt + 1}/5) — '
-                  f'sleeping {delay}s', file=sys.stderr)
-            time.sleep(delay)
+    # One shallow clone gives us BOTH the staging tree AND the list of
+    # tracked files — no recursive `tree?recursive=true` API call (the
+    # single biggest source of HF 429s for this script). See hf_clone.py.
+    print('Cloning repo (shallow)…')
+    from hf_clone import clone_hf_shallow
+    snap_dir = clone_hf_shallow(REPO, args.token, repo_type=RTYPE)
+    repo_files = set(
+        subprocess.check_output(
+            ['git', 'ls-files'], cwd=str(snap_dir), text=True,
+        ).splitlines()
+    )
+    print(f'Repo tracks {len(repo_files)} files.')
 
-    existing = _load_existing(api, args.token)
+    existing = _load_existing(snap_dir)
     print(f'Existing data/annotations.jsonl: {len(existing)} entries')
 
     name_votes, slot_votes, crop_src, per_install = _collect_votes(
-        api, args.token, since=args.since, repo_files=repo_files)
+        snap_dir, since=args.since, repo_files=repo_files)
     print(f'Contributors: {len(per_install)}   '
           f'unique sha hashes voted on: {len(name_votes)}')
 

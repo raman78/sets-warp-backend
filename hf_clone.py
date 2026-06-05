@@ -54,6 +54,21 @@ def clone_hf_shallow(
     cache_root.mkdir(parents=True, exist_ok=True)
     cache_dir = cache_root / repo_id.replace('/', '__')
 
+    # Pre-flight: hit the API endpoint via huggingface_hub. Since 1.2.0 the
+    # SDK parses the IETF RateLimit-Reset header on a 429 and waits the
+    # exact reset window — much smarter than git, which only sees a bare
+    # "fatal: ... error 429". If repo_info succeeds the 5-minute window is
+    # fresh and the subsequent clone/fetch will not be throttled.
+    try:
+        from huggingface_hub import HfApi
+        HfApi(token=token).repo_info(repo_id=repo_id, repo_type=repo_type)
+    except Exception as e:
+        # Don't fail outright — the legacy retry below still gets a chance,
+        # and a missing repo / bad token will surface there with the same
+        # error git produces anyway.
+        print(f'  pre-flight repo_info({repo_id}) warning: {e}',
+              file=sys.stderr, flush=True)
+
     remote_url  = _remote_url(repo_id, repo_type)
     auth_header = f'Authorization: Bearer {token}'
     env = {

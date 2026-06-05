@@ -38,8 +38,11 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
+        # Pin huggingface_hub >= 1.2.0 — that version parses the IETF
+        # RateLimit-Reset header on 429 and waits the exact reset window
+        # instead of crashing. See https://huggingface.co/docs/hub/rate-limits
         run: |
-          pip install --quiet huggingface_hub
+          pip install --quiet 'huggingface_hub>=1.7.2'
 
       - name: Merge staging contributions into data/
         env:
