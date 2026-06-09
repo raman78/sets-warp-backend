@@ -1,0 +1,111 @@
+# .github/workflows/audit_staging_health.yml
+#
+# Staging Health Audit — monthly anomaly detector
+# ===============================================
+# Runs admin_audit_staging.py (read-only) on the 1st of every month and
+# on-demand via workflow_dispatch. Counts staging items whose semantic
+# key is already in data/ — i.e., entries the regular mergers will
+# never re-tally because nobody is re-voting on them.
+#
+# Healthy steady state: orphans=0 in every domain. The regular mergers
+# (merge_staging.yml, every 2h) drain on promote, so anything leftover
+# means either:
+#   (a) legacy backlog from before drain logic existed, or
+#   (b) a regression in one of the mergers that silently leaks orphans.
+#
+# If orphans exceed thresholds (defaults: crops=100, screens=50,
+# contributions=50), the audit exits 1, the workflow fails, and GitHub
+# emails the repo owner. We do NOT auto-fix — cleaning the leak is a
+# manual step via drain_stale_staging.yml after root-cause analysis.
+#
+# Anchors are off by default because their staging files aggregate
+# multiple contributor votes; a "stale" anchor may be in-flight rather
+# than orphaned. Re-enable via workflow_dispatch input if needed.
+
+name: Staging Health Audit
+
+on:
+  schedule:
+    - cron: '0 4 1 * *'   # 1st of month, 04:00 UTC
+  workflow_dispatch:
+    inputs:
+      crops_max:
+        description: 'Max crop orphans before BREACH (default: 100)'
+        required: false
+        default: '100'
+        type: string
+      screens_max:
+        description: 'Max screen orphans before BREACH (default: 50)'
+        required: false
+        default: '50'
+        type: string
+      contribs_max:
+        description: 'Max processed contributions undrained (default: 50)'
+        required: false
+        default: '50'
+        type: string
+      include_anchors:
+        description: 'Also audit anchor staging files'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install --quiet 'huggingface_hub>=1.7.2'
+
+      - name: Audit staging vs data/
+        id: audit
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          WARP_NO_VENV: '1'
+        run: |
+          CROPS_MAX="${{ github.event.inputs.crops_max || '100' }}"
+          SCR_MAX="${{ github.event.inputs.screens_max || '50' }}"
+          CON_MAX="${{ github.event.inputs.contribs_max || '50' }}"
+          ANCHORS_FLAG=""
+          if [ "${{ github.event.inputs.include_anchors }}" = "true" ]; then
+            ANCHORS_FLAG="--include-anchors"
+          fi
+          python admin_audit_staging.py \
+            --crops-max "$CROPS_MAX" \
+            --screens-max "$SCR_MAX" \
+            --contribs-max "$CON_MAX" \
+            $ANCHORS_FLAG | tee /tmp/audit.log
+
+      - name: Publish summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo '## Staging Health Audit'
+            echo
+            echo '```'
+            grep -h '^AUDIT: ' /tmp/audit.log 2>/dev/null || echo 'no AUDIT lines found'
+            echo '```'
+            echo
+            if grep -q 'status=BREACH' /tmp/audit.log 2>/dev/null; then
+              echo '### ⚠ Threshold breached'
+              echo
+              echo 'Root-cause analysis is required before cleanup.'
+              echo 'After verifying the leak is understood, trigger'
+              echo '`drain_stale_staging.yml` (workflow_dispatch) to clean up.'
+            else
+              echo '### ✓ Healthy'
+              echo
+              echo 'All domains below threshold.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

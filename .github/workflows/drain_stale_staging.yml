@@ -1,0 +1,90 @@
+# .github/workflows/drain_stale_staging.yml
+#
+# Manual Stale-Staging Drain — admin-triggered cleanup
+# ====================================================
+# This workflow is the cleanup counterpart to audit_staging_health.yml.
+# It is INTENTIONALLY workflow_dispatch only — no schedule — so the
+# admin must consciously trigger it after diagnosing why orphans piled
+# up in the first place.
+#
+# Why no cron: if the regular mergers ever start leaking orphans, a
+# scheduled cleanup would silently paper over the bug. The monthly
+# audit fails the workflow → emails the owner → owner investigates →
+# owner triggers this workflow with dry_run=true to preview → flips to
+# dry_run=false when satisfied. Two clicks, but no surprises.
+#
+# Inputs:
+#   dry_run         — default 'true' for safety. Flip to 'false' to commit.
+#   include_anchors — default 'false'. Anchor staging files aggregate
+#                     votes per file; draining one with in-flight
+#                     contributors loses their slot data. Only enable
+#                     after confirming the active merger has had at least
+#                     one cycle to absorb fresh anchor contributions.
+
+name: Drain Stale Staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry-run (report only, no deletes). Set false to commit.'
+        required: false
+        default: 'true'
+        type: string
+      include_anchors:
+        description: 'Also drain anchor staging files (lossy — see docs)'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  drain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install --quiet 'huggingface_hub>=1.7.2'
+
+      - name: Drain stale staging
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO_ID: ${{ secrets.HF_REPO_ID || 'sets-sto/warp-knowledge' }}
+          WARP_NO_VENV: '1'
+        run: |
+          APPLY_FLAG=""
+          if [ "${{ github.event.inputs.dry_run }}" = "false" ]; then
+            APPLY_FLAG="--apply"
+          fi
+          ANCHORS_FLAG=""
+          if [ "${{ github.event.inputs.include_anchors }}" = "true" ]; then
+            ANCHORS_FLAG="--include-anchors"
+          fi
+          python admin_drain_stale_staging.py $APPLY_FLAG $ANCHORS_FLAG \
+            | tee /tmp/drain.log
+
+      - name: Publish summary
+        if: ${{ always() }}
+        run: |
+          MODE='DRY-RUN'
+          if [ "${{ github.event.inputs.dry_run }}" = "false" ]; then
+            MODE='APPLY'
+          fi
+          {
+            echo "## Stale-Staging Drain — $MODE"
+            echo
+            echo '```'
+            grep -hE '^(crops|screens|contributions|anchors|--|==|Plan total)' \
+              /tmp/drain.log 2>/dev/null \
+              || echo 'no drain output captured'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
