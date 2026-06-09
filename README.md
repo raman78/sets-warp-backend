@@ -1,69 +1,162 @@
-# SETS WARP Backend
+# sets-warp-backend
 
-Backend service for the **Weapon & Armor Recognition Program (WARP)**. It handles community-contributed data (icon crops and screenshots), performs democratic voting, and automates model training.
+Backend service for the **WARP** (Weapon & Armor Recognition Program)
+ecosystem. Receives community-contributed icon crops, screen-type
+screenshots, anchor grids, and pHash overrides from sto-warp clients;
+runs democratic voting; trains the EfficientNet-B0 icon classifier,
+MobileNetV3-Small screen classifier, and ArcFace embedder; publishes
+the trained models back out for every install.
 
-## 🚀 System Architecture
-- **FastAPI (Render)**: Receives contributions and serves the knowledge base/models.
-- **Hugging Face Hub**: Stores raw data (Dataset) and hosted models.
-- **GitHub Actions**: Automates model training (EfficientNet-B0 and MobileNetV3).
-
----
-
-## 🛠 Setup & Configuration
-
-### 1. Hugging Face Setup
-- Create a **Dataset** repository (e.g., `sets-sto/warp-knowledge`).
-- Generate a **Write Token** in HF Settings → Access Tokens.
-
-### 2. GitHub Actions Setup
-- Go to your GitHub repository **Settings → Secrets and variables → Actions**.
-- Add the following **Secrets**:
-  - `HF_TOKEN`: Your Hugging Face write token.
-- (Optional) Add **Variables** if you use non-default repo names:
-  - `HF_DATASET`: Source dataset repo.
-  - `HF_REPO_ID`: Target model repo.
-
-### 3. Render Deployment (Production)
-Deploy the FastAPI service to Render and set these **Environment Variables**:
-- `HF_TOKEN`: Your HF write token.
-- `HF_REPO_ID`: Your model/data repo (e.g., `sets-sto/warp-knowledge`).
-- `ADMIN_KEY`: A secret string to protect admin endpoints.
-- `GH_TOKEN`: GitHub Personal Access Token (with `workflow` scope) to trigger training.
-- `GH_REPO`: Your GitHub repository path (e.g., `username/repo`).
+This backend holds the only HuggingFace write token in the system —
+clients never touch HF directly for writes.
 
 ---
 
-## 🛰 Endpoints
-- `GET /health`: Service status.
-- `GET /knowledge`: Returns the merged icon knowledge base (phash -> name).
-- `GET /model/version`: Metadata for the latest trained model.
-- `POST /contribute`: Accepts crop PNG + metadata from clients.
-- `POST /webhooks/hf-dataset`: Triggered by HF when the dataset is updated (starts GitHub training).
-- `POST /admin/merge`: (Requires `X-Admin-Key`) Merges raw contributions into `knowledge.json`.
+## Architecture
+
+- **FastAPI on Render** — receives client uploads, serves `/knowledge`
+  and `/model/version`.
+- **HuggingFace Datasets** — `sets-sto/sto-icon-dataset` (raw + curated
+  data), `sets-sto/warp-knowledge` (models + pHash overrides).
+- **GitHub Actions** — runs the four democratic mergers every 2 h,
+  trains the classifiers hourly, trains the embedder daily, runs the
+  staging audit monthly.
+
+For the end-to-end data flow see
+[docs/DATA_LIFECYCLE.md](docs/DATA_LIFECYCLE.md). For component-level
+detail see [docs/technical_overview.md](docs/technical_overview.md).
 
 ---
 
-## 🧠 Model Training
-Training runs automatically every hour via GitHub Actions, or can be triggered manually:
+## Setup
 
-### Local Training
+### 1. HuggingFace
+
+- Create two Dataset repos: `sets-sto/sto-icon-dataset` (data) and
+  `sets-sto/warp-knowledge` (models).
+- Generate one **Write Token** in HF Settings → Access Tokens.
+
+### 2. GitHub Actions
+
+In **Settings → Secrets and variables → Actions**, add:
+
+| Secret | Purpose |
+|---|---|
+| `HF_TOKEN` | HuggingFace write token |
+
+Optionally add **Variables** for non-default repo names:
+
+| Variable | Default |
+|---|---|
+| `HF_DATASET` | `sets-sto/sto-icon-dataset` |
+| `HF_REPO_ID` | `sets-sto/warp-knowledge` |
+
+### 3. Render deployment
+
+Set these **Environment Variables** on the web service:
+
+| Var | Purpose |
+|---|---|
+| `HF_TOKEN` | HF write token |
+| `HF_REPO_ID` | Model + knowledge repo (default `sets-sto/warp-knowledge`) |
+| `HF_ICONS_REPO_ID` | Icon dataset repo (default `sets-sto/sto-icon-dataset`) |
+| `ADMIN_KEY` | Retained for `/admin/merge` 410 response |
+| `GH_TOKEN` | GitHub PAT with `workflow` scope, used by `/webhooks/hf-dataset` |
+| `GH_REPO` | This repo, e.g. `sets-sto/sets-warp-backend` |
+| `MAX_REQ_PER_IP` | Optional, default 500/day |
+| `MAX_REQ_PER_INSTALL` | Optional, default 500/day |
+
+`render.yaml` pins Python to 3.12 and `requirements.txt` pins every
+dependency with `==`. Do not relax the pins without a deliberate test
+on a Render preview environment.
+
+---
+
+## Endpoints
+
+### Client-facing
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/health` | Liveness check |
+| `GET` | `/knowledge` | Merged pHash → item-name table |
+| `GET` | `/model/version` | Latest trained model metadata |
+| `GET` | `/config/labels` | Backend-side label map |
+| `POST` | `/contribute` | Single pHash contribution (legacy) |
+| `POST` | `/contribute/bulk-crops` | Up to 50 confirmed crops per batch |
+| `POST` | `/upload/screen-types` | Up to 20 screen-type screenshots per batch |
+| `POST` | `/upload/anchors` | Up to 20 anchor grids per batch |
+
+### Internal
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/webhooks/hf-dataset` | HF webhook → triggers GH training |
+| `POST` | `/admin/merge` | Retired — returns HTTP 410 |
+
+---
+
+## Scripts
+
+| Script | Role |
+|---|---|
+| `democratic_merge_crops.py` | Promote icon crops staging → `data/crops/` |
+| `democratic_merge_anchors.py` | Promote anchor grids → `data/anchors/` |
+| `democratic_merge_screens.py` | Promote screen types + text corrections |
+| `admin_merge.py` | Fold pHash contributions into `knowledge.json` |
+| `admin_train.py` | Train EfficientNet-B0 + MobileNetV3-Small |
+| `admin_train_metric.py` | Train ArcFace embedder + gallery |
+| `admin_audit_staging.py` | Read-only orphan check (monthly cron) |
+| `admin_drain_stale_staging.py` | Manual cleanup when audit breaches |
+| `admin_scrub_knowledge.py` | Remove bad pHash entries |
+| `admin_clean_labels.py` | Remove bad crop labels |
+
+---
+
+## GitHub Actions workflows
+
+| Workflow | Cadence | Runs |
+|---|---|---|
+| `merge_staging.yml` | every 2 h, `22 */2 * * *` | All four mergers |
+| `train_central_model.yml` | hourly, `0 * * * *` | `admin_train.py` |
+| `train_metric_model.yml` | daily, `45 0 * * *` | `admin_train_metric.py` |
+| `audit_staging_health.yml` | monthly, `0 4 1 * *` | `admin_audit_staging.py` |
+| `drain_stale_staging.yml` | manual only | `admin_drain_stale_staging.py` |
+
+---
+
+## Manual commands
+
 ```sh
-# Requires PyTorch, Torchvision, OpenCV
-python admin_train.py --train --min 1
-```
+# Dry-run all mergers
+python democratic_merge_crops.py
+python democratic_merge_anchors.py
+python democratic_merge_screens.py
+python admin_merge.py
 
-### Manual Merge
-```sh
+# Apply with default Z3 thresholds (NEW=1, UPDATE>=2)
+python democratic_merge_crops.py --apply
 python admin_merge.py --apply
+
+# Train with upload
+python admin_train.py --train --min 1
+
+# Local FastAPI smoke test
+python main.py
 ```
 
 ---
 
-## 📄 Documentation
-- Detailed guidelines: [CLAUDE.md](./CLAUDE.md)
-- Technical Overview: [docs/technical_overview.md](./docs/technical_overview.md)
-- User Guide: [docs/user_guide.md](./docs/user_guide.md)
-- Recent Changes: [CHANGELOG.md](./CHANGELOG.md)
+## Documentation
 
-## ⚖ License
+- [Data Lifecycle](docs/DATA_LIFECYCLE.md) — end-to-end data flow
+- [Technical Overview](docs/technical_overview.md) — components and contracts
+- [User Guide](docs/user_guide.md) — admin commands + recovery procedures
+- [Agent Guidelines](CLAUDE.md) — AI-assisted-dev rules
+- [Changelog](CHANGELOG.md) — release notes
+
+---
+
+## License
+
 MIT
