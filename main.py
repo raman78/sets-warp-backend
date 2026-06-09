@@ -19,7 +19,7 @@
 # Environment variables (set in Render dashboard):
 #   HF_TOKEN        — HF write token (kept SECRET)
 #   HF_REPO_ID      — e.g. "sets-sto/warp-knowledge"
-#   ADMIN_KEY       — secret key for /admin/merge endpoint
+#   ADMIN_KEY       — legacy /admin/merge gate; endpoint retired (410) per D-G.8
 #   MAX_REQ_PER_IP        — rate limit per IP per day (default: 500)
 #   MAX_REQ_PER_INSTALL   — rate limit per install_id per day (default: 500)
 #   GH_TOKEN        — GitHub Personal Access Token (with workflow scope)
@@ -667,52 +667,17 @@ async def _trigger_github_workflow() -> None:
 
 @app.post('/admin/merge')
 async def admin_merge(
-    x_admin_key: str = Header(..., alias='X-Admin-Key')
+    x_admin_key: str = Header(None, alias='X-Admin-Key')
 ):
-    """Admin endpoint: merge confirmed contributions into knowledge.json."""
-    if not ADMIN_KEY or x_admin_key != ADMIN_KEY:
-        raise HTTPException(403, 'Forbidden')
-
-    contributions = _load_all_contributions_from_hf()
-    if not contributions:
-        return {'ok': True, 'merged': 0, 'message': 'No contributions found'}
-
-    existing = _load_knowledge_from_hf()
-    merged   = dict(existing)
-
-    from collections import Counter
-    phash_votes: dict[str, Counter] = {}
-    for c in contributions:
-        if not c.get('confirmed'):
-            continue
-        ph   = c.get('phash', '')
-        name = c.get('item_name', '').strip()
-        if ph and name:
-            phash_votes.setdefault(ph, Counter())[name] += 1
-
-    new_entries = 0
-    for ph, votes in phash_votes.items():
-        winner, count = votes.most_common(1)[0]
-        if count >= 2 or (count >= 1 and ph not in merged):
-            if merged.get(ph) != winner:
-                merged[ph] = winner
-                new_entries += 1
-
-    ok = _hf_upload_files({
-        'knowledge.json': json.dumps(
-            {'knowledge': merged, 'updated_at': datetime.now(timezone.utc).isoformat() + 'Z'},
-            ensure_ascii=False, indent=2
-        ).encode('utf-8')
-    }, message=f'admin_merge: {new_entries} new entries')
-
-    if ok:
-        global _knowledge_cache, _knowledge_cache_ts
-        _knowledge_cache    = merged
-        _knowledge_cache_ts = time.time()
-        log.info(f'Merge complete: {new_entries} new entries, total={len(merged)}')
-        return {'ok': True, 'merged': new_entries, 'total': len(merged)}
-    else:
-        raise HTTPException(503, 'Failed to write knowledge.json to HF')
+    """Retired (D-G.8): merge logic now lives in admin_merge.py, scheduled
+    every 2 hours by .github/workflows/merge_staging.yml. The HTTP entry
+    point would duplicate the CI worker and could race with it on the same
+    knowledge.json file. Always returns 410 Gone."""
+    raise HTTPException(
+        status_code=410,
+        detail='/admin/merge retired — democratic merging runs every 2h via '
+               'the merge_staging.yml GitHub Action. See admin_merge.py.',
+    )
 
 
 # ── Validation helpers ─────────────────────────────────────────────────────────
@@ -970,28 +935,6 @@ def _load_knowledge_from_hf() -> dict[str, str]:
     except Exception as e:
         log.warning(f'knowledge.json load failed: {e}')
         return {}
-
-
-def _load_all_contributions_from_hf() -> list[dict]:
-    """List and download all contribution JSON files from HF Dataset (optimized)."""
-    if not HF_TOKEN or not HF_REPO_ID:
-        return []
-    try:
-        from huggingface_hub import HfApi, hf_hub_download
-        api = HfApi(token=HF_TOKEN)
-        elements = api.list_repo_tree(HF_REPO_ID, path_in_repo='contributions', repo_type='dataset', recursive=True)
-        json_files = [e.path for e in elements if e.path.endswith('.json')]
-        contribs = []
-        for f in json_files:
-            try:
-                local = hf_hub_download(HF_REPO_ID, f, repo_type='dataset', token=HF_TOKEN)
-                contribs.append(json.loads(Path(local).read_text()))
-            except Exception as e:
-                log.debug(f'skip {f}: {e}')
-        return contribs
-    except Exception as e:
-        log.error(f'list contributions failed: {e}')
-        return []
 
 
 # ── Rate limit helpers ─────────────────────────────────────────────────────────

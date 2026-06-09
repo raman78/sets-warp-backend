@@ -1,0 +1,102 @@
+# .github/workflows/merge_staging.yml
+#
+# Automated WARP Democratic Merge — GitHub Actions (4-in-1)
+# ==========================================================
+# Runs every 2 hours. One CI job sequentially executes every staging
+# merger so the data/ artefacts on both HF repos stay coherent:
+#
+#   1. democratic_merge_crops.py   — staging/<iid>/{crops,annotations.jsonl}
+#                                    → data/{crops/<sha>.png, annotations.jsonl}
+#                                      on sets-sto/sto-icon-dataset
+#
+#   2. democratic_merge_anchors.py — staging/<iid>/anchors_grid_*.json
+#                                    → data/anchors/<bt>_<bucket>.json
+#                                      on sets-sto/sto-icon-dataset
+#
+#   3. democratic_merge_screens.py — staging/<iid>/screen_types/<TYPE>/*.png
+#                                    + Ship Type/Tier annotations
+#                                    → data/screen_types/<TYPE>/<sha>.png
+#                                      + data/screen_types/metadata.jsonl
+#                                      + data/text_corrections.jsonl
+#                                      on sets-sto/sto-icon-dataset
+#
+#   4. admin_merge.py              — contributions/*.json
+#                                    → knowledge.json (phash → name)
+#                                      on sets-sto/warp-knowledge
+#
+# Each merger uses Z3 asymmetric thresholds (NEW=1 OK, UPDATE >= --min).
+# A failure in one step does NOT block the others — they're independent
+# domains. GitHub Actions for PUBLIC repos = unlimited free minutes.
+#
+# SETUP (one-time):
+#   GitHub repo → Settings → Secrets and variables → Actions → New secret:
+#     HF_TOKEN   = <your HF write token>
+#
+# Optional secret (if knowledge HF repo differs from default):
+#     HF_REPO_ID = sets-sto/warp-knowledge
+
+name: Merge Staging
+
+on:
+  schedule:
+    - cron: '22 */2 * * *'   # every 2 hours, off-peak offset
+  workflow_dispatch:
+    inputs:
+      min_votes:
+        description: 'Minimum vote count to UPDATE an existing entry (NEW always requires 1, per Z3 asymmetric policy)'
+        required: false
+        default: '2'
+        type: string
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --quiet huggingface_hub requests
+
+      - name: Merge crops (staging/<iid>/crops → data/crops + annotations.jsonl)
+        if: ${{ always() }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          WARP_NO_VENV: '1'
+        run: |
+          MIN_VOTES="${{ github.event.inputs.min_votes || '2' }}"
+          python democratic_merge_crops.py --apply --min "$MIN_VOTES"
+
+      - name: Merge anchors (staging/<iid>/anchors_grid_*.json → data/anchors/)
+        if: ${{ always() }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          MIN_VOTES="${{ github.event.inputs.min_votes || '2' }}"
+          python democratic_merge_anchors.py --apply --min "$MIN_VOTES"
+
+      - name: Merge screens (staging/<iid>/screen_types + text → data/screen_types + text_corrections)
+        if: ${{ always() }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          MIN_VOTES="${{ github.event.inputs.min_votes || '2' }}"
+          python democratic_merge_screens.py --apply --min "$MIN_VOTES"
+
+      - name: Merge knowledge (contributions/*.json → knowledge.json on warp-knowledge)
+        if: ${{ always() }}
+        env:
+          HF_TOKEN:   ${{ secrets.HF_TOKEN }}
+          HF_REPO_ID: ${{ secrets.HF_REPO_ID || 'sets-sto/warp-knowledge' }}
+        run: |
+          MIN_VOTES="${{ github.event.inputs.min_votes || '2' }}"
+          python admin_merge.py --apply --min "$MIN_VOTES"
