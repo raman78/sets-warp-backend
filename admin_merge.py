@@ -241,14 +241,30 @@ def _compact_processed(
 
 
 def _hf_save_state(
-    knowledge:      dict[str, str],
-    processed_ids:  list[str],
-    watermark_date: str,
+    knowledge:        dict[str, str],
+    processed_ids:    list[str],
+    watermark_date:   str,
+    losers_by_phash:  dict[str, dict[str, int]] | None = None,
+    drain_contribs:   list[Path] | None              = None,
 ) -> bool:
-    """Saves knowledge.json + processed_contributions + watermark_date to HF."""
+    """Save knowledge.json + (optionally) drain promoted contributions in a
+    single atomic HF commit.
+
+    D-B.5: `losers_by_phash` is persisted as a top-level field so dissent
+    survives in the artefact (the runtime `knowledge` map stays a plain
+    `phash → name` to preserve the client API contract).
+
+    D-G.9: `drain_contribs` is a list of paths on the local snapshot pointing
+    at contribution files whose phash made consensus. Both `<uuid>.json` and
+    `<uuid>.png` get a CommitOperationDelete in the same commit as the
+    knowledge.json write — no half-applied state.
+    """
     try:
-        from huggingface_hub import HfApi
-        api     = HfApi(token=HF_TOKEN)
+        from huggingface_hub import (
+            HfApi, CommitOperationAdd, CommitOperationDelete,
+        )
+        import io as _io
+        api = HfApi(token=HF_TOKEN)
         payload_obj = {
             'knowledge':                knowledge,
             'updated_at':               datetime.now(UTC).isoformat() + 'Z',
@@ -256,15 +272,35 @@ def _hf_save_state(
             'processed_contributions':  processed_ids,
             'watermark_date':           watermark_date,
         }
+        if losers_by_phash:
+            payload_obj['losers'] = losers_by_phash
         payload = json.dumps(payload_obj, ensure_ascii=False, indent=2).encode('utf-8')
-        api.upload_file(
-            path_or_fileobj=payload,
-            path_in_repo='knowledge.json',
-            repo_id=HF_REPO_ID,
-            repo_type='dataset',
-            commit_message=f'admin_merge: {len(knowledge)} entries, '
-                           f'{len(processed_ids)} tracked '
-                           f'({datetime.now(UTC).strftime("%Y-%m-%d %H:%M")} UTC)',
+
+        ops: list = [CommitOperationAdd(
+            path_in_repo  ='knowledge.json',
+            path_or_fileobj=_io.BytesIO(payload),
+        )]
+
+        deleted = 0
+        for p in (drain_contribs or []):
+            # Each contribution file lives under contributions/YYYY-MM-DD/.
+            # The snapshot root is two parents up (snapshot/contributions/<date>/uuid.json).
+            rel = f'contributions/{p.parent.name}/{p.name}'
+            ops.append(CommitOperationDelete(path_in_repo=rel))
+            deleted += 1
+            png = p.with_suffix('.png')
+            rel_png = f'contributions/{p.parent.name}/{png.name}'
+            ops.append(CommitOperationDelete(path_in_repo=rel_png))
+            deleted += 1
+
+        api.create_commit(
+            repo_id        = HF_REPO_ID,
+            repo_type      = 'dataset',
+            operations     = ops,
+            commit_message = (f'admin_merge: {len(knowledge)} entries, '
+                              f'{len(processed_ids)} tracked, '
+                              f'drained {deleted // 2} promoted contribs '
+                              f'({datetime.now(UTC).strftime("%Y-%m-%d %H:%M")} UTC)'),
         )
         return True
     except Exception as e:
@@ -289,16 +325,25 @@ def merge(
     existing:   dict[str, str],
     min_votes:  int = 2,
     verbose:    bool = False,
-) -> tuple[dict[str, str], list[dict]]:
+) -> tuple[dict[str, str], list[dict], dict[str, dict[str, int]], dict[str, set[str]]]:
     """
     Majority-vote merge.
 
-    Returns (merged_knowledge, report_rows).
-    report_rows — list of dictionaries for display.
+    Returns (merged_knowledge, report_rows, losers_by_phash, contribs_by_phash):
+      - merged_knowledge[phash]   → winning name (string — runtime API contract).
+      - report_rows               → display dicts (for printing + summary stats).
+      - losers_by_phash[phash]    → minority {name: count} (top 3), populated
+        only for entries that actually made it into merged_knowledge. Stored
+        as a parallel top-level field in knowledge.json (D-B.5).
+      - contribs_by_phash[phash]  → set of contribution_id whose vote landed
+        on that phash. The drain (D-G.9) uses this to issue
+        CommitOperationDelete for every uuid that contributed to a promoted
+        phash, draining contributions/ after consensus.
     """
     # Group by phash
     phash_votes: dict[str, Counter] = {}
     phash_meta:  dict[str, dict]    = {}   # phash → {total, confirmed, wrong_names}
+    contribs_by_phash: dict[str, set[str]] = {}
 
     for c in contribs:
         if not isinstance(c, dict):
@@ -318,11 +363,15 @@ def merge(
         wrong = c.get('wrong_name', '').strip()
         if wrong:
             meta['wrong'][wrong] += 1
+        cid = (c.get('contribution_id') or '').strip()
+        if cid:
+            contribs_by_phash.setdefault(ph, set()).add(cid)
 
     # Drop already-merged poison entries (legacy data from before the filter
     # existed). This rewrites knowledge.json to a clean state on next merge.
     merged  = {ph: nm for ph, nm in existing.items() if not _is_poison_name(nm)}
     report  = []
+    losers_by_phash: dict[str, dict[str, int]] = {}
     _dropped_poison = len(existing) - len(merged)
     if _dropped_poison > 0:
         print(f'[clean] dropped {_dropped_poison} legacy poison entries '
@@ -347,6 +396,9 @@ def merge(
             else:
                 action = 'NEW'
                 merged[ph] = winner
+            losers_top = {n: v for n, v in votes.most_common()[1:4] if n != winner}
+            if losers_top:
+                losers_by_phash[ph] = losers_top
 
         row = {
             'phash':    ph,
@@ -363,7 +415,7 @@ def merge(
         if verbose or action in ('NEW', 'UPDATE', 'SKIP'):
             _print_row(row)
 
-    return merged, report
+    return merged, report, losers_by_phash, contribs_by_phash
 
 
 def _print_row(row: dict):
@@ -443,7 +495,9 @@ Environment variables (.env):
     print(f'\nLoaded {len(contribs)} new contributions ({confirmed} confirmed)\n')
 
     # 3. Merge
-    merged, report = merge(contribs, existing, min_votes=args.min, verbose=args.verbose)
+    merged, report, losers_by_phash, contribs_by_phash = merge(
+        contribs, existing, min_votes=args.min, verbose=args.verbose,
+    )
 
     # 4. Report
     new_count     = sum(1 for r in report if r['action'] == 'NEW')
@@ -478,16 +532,29 @@ Environment variables (.env):
             updated_processed, watermark, all_paths,
         )
 
-        if new_count == 0 and update_count == 0 and new_watermark == watermark:
+        # D-G.9: identify which on-disk contribution files belong to a
+        # promoted phash so we can delete them in the same commit. SKIP
+        # contributions are kept — they may accumulate more votes later.
+        promoted_phashes = {r['phash'] for r in report
+                            if r['action'] in ('NEW', 'UPDATE', 'unchanged')}
+        promoted_cids: set[str] = set()
+        for ph in promoted_phashes:
+            promoted_cids |= contribs_by_phash.get(ph, set())
+        drain_paths = [p for p in all_paths if p.stem in promoted_cids]
+
+        if new_count == 0 and update_count == 0 and new_watermark == watermark and not drain_paths:
             # Same knowledge, same watermark — still worth writing back to
             # advance processed_ids so we don't re-pull the same SKIPs.
             print(f'\nNo knowledge changes, but advancing tracked IDs '
                   f'({len(processed_ids)} → {len(compacted_ids)})...')
         else:
             print(f'\nSaving {len(merged)} entries to HF '
-                  f'(tracked IDs: {len(compacted_ids)}, watermark: {new_watermark or "(none)"})...')
+                  f'(tracked IDs: {len(compacted_ids)}, watermark: {new_watermark or "(none)"}, '
+                  f'draining {len(drain_paths)} promoted contributions)...')
 
-        ok = _hf_save_state(merged, compacted_ids, new_watermark)
+        ok = _hf_save_state(merged, compacted_ids, new_watermark,
+                            losers_by_phash=losers_by_phash,
+                            drain_contribs=drain_paths)
         if ok:
             print('OK — knowledge.json updated on HF.')
         else:

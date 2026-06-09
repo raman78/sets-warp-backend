@@ -20,7 +20,8 @@
 #   HF_TOKEN        — HF write token (kept SECRET)
 #   HF_REPO_ID      — e.g. "sets-sto/warp-knowledge"
 #   ADMIN_KEY       — secret key for /admin/merge endpoint
-#   MAX_REQ_PER_IP  — rate limit per IP per day (default: 500)
+#   MAX_REQ_PER_IP        — rate limit per IP per day (default: 500)
+#   MAX_REQ_PER_INSTALL   — rate limit per install_id per day (default: 500)
 #   GH_TOKEN        — GitHub Personal Access Token (with workflow scope)
 #   GH_REPO         — GitHub repository (e.g. "sets-sto/sets-warp-backend")
 
@@ -31,6 +32,7 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -71,7 +73,8 @@ HF_REPO_ID        = os.environ.get('HF_REPO_ID', 'sets-sto/warp-knowledge')
 # the icon training data lives in its own dataset.
 HF_ICONS_REPO_ID  = os.environ.get('HF_ICONS_REPO_ID', 'sets-sto/sto-icon-dataset')
 ADMIN_KEY         = os.environ.get('ADMIN_KEY', '')
-MAX_REQ_PER_IP    = int(os.environ.get('MAX_REQ_PER_IP', '500'))
+MAX_REQ_PER_IP      = int(os.environ.get('MAX_REQ_PER_IP', '500'))
+MAX_REQ_PER_INSTALL = int(os.environ.get('MAX_REQ_PER_INSTALL', '500'))
 
 # Bulk-endpoint payload limits — guards against accidental floods and HF
 # commit-size limits. Per-item caps mirror client-side validation in
@@ -89,6 +92,41 @@ _TEXT_CROP_PREFIXES    = ('ship_type_', 'ship_tier_')
 _INSTALL_ID_RE         = re.compile(r'^[a-zA-Z0-9_-]{8,64}$')
 _SCREEN_TYPE_RE        = re.compile(r'^[a-zA-Z0-9_-]{1,40}$')
 
+# Anchor grid validation (D-G.5). Coord values are relative (0.0-1.0);
+# aspect is monitor width/height, from 16:10 portrait (~0.62) up to
+# 32:9 ultrawide (~3.56). Resolution, when supplied, must look like
+# WIDTHxHEIGHT in pixels.
+_ANCHOR_COORD_KEYS = ('x0_rel', 'y_rel', 'w_rel', 'h_rel', 'step_rel')
+_ANCHOR_ASPECT_MIN = 0.5
+_ANCHOR_ASPECT_MAX = 3.5
+_RESOLUTION_RE     = re.compile(r'^\d{3,5}x\d{3,5}$')
+
+# Poison label policy — see docs/data_source_audit.md D-A.1 / D-G.1.
+#
+# Virtual classes (__empty__, __inactive__, __boff_*) and leftover dev-test
+# entries used to be rejected at ingress (every endpoint that wrote into
+# staging or contributions). Per D-A.1 they are now legitimate ML labels
+# end-to-end; client-side defense-in-depth (sto-warp icon_matcher.py:244)
+# still suppresses them as knowledge.json hard-overrides, so the user view
+# is protected without rejecting input.
+#
+# Toggle _POISON_FILTER_ENABLED back to True to restore the previous
+# behaviour at every call site simultaneously. Rollback MUST happen in
+# lockstep with the client (sto-warp warp/knowledge/sync_client.py) —
+# atomic rollback per docs/client_user_view_filter.md Z5-C.3.
+_POISON_FILTER_ENABLED = False
+
+
+def _is_poison_label(name: str) -> bool:
+    """Return True if `name` is a virtual class or dev-test placeholder
+    that should be rejected at ingress. Always False while the policy
+    flag is disabled (D-A.1)."""
+    if not _POISON_FILTER_ENABLED:
+        return False
+    stripped = (name or '').strip()
+    return stripped.startswith('__') or stripped == 'Test Item Name'
+
+
 # GitHub Config for automated training triggers
 GH_TOKEN = os.environ.get('GH_TOKEN', '')
 GH_REPO  = os.environ.get('GH_REPO', 'sets-sto/sets-warp-backend')
@@ -105,6 +143,15 @@ KNOWLEDGE_CACHE_TTL = 300  # seconds
 # In-memory model version cache
 _model_version_cache: dict = {}
 _model_version_cache_ts: float = 0.0
+
+# In-memory whitelist cache (D-G.6). Runtime source of truth is HF
+# `<HF_ICONS_REPO_ID>:config/labels.json`; bundled `config/labels.json`
+# in the repo is the bootstrap fallback used when HF is unreachable or
+# the file has not been seeded yet. Both endpoints `/upload/screen-types`
+# and `/upload/anchors` consult this list before touching staging.
+_labels_cache: dict = {}
+_labels_cache_ts: float = 0.0
+LABELS_CACHE_TTL = 300  # seconds
 
 app = FastAPI(
     title='WARP Knowledge Backend',
@@ -217,6 +264,16 @@ async def get_model_version():
     return JSONResponse({'available': True, **_model_version_cache})
 
 
+@app.get('/config/labels')
+async def get_config_labels():
+    """Return the screen-type / slot whitelist used by the ingestion
+    endpoints. Clients MAY use this for pre-flight validation, but the
+    backend treats it as the authoritative source — the client copy is
+    only a hint.
+    """
+    return JSONResponse(_get_labels())
+
+
 @app.get('/knowledge')
 async def get_knowledge():
     """Return the merged community knowledge base."""
@@ -238,7 +295,8 @@ async def contribute(req: ContributeRequest, request: Request):
     """
     client_ip = _get_client_ip(request)
 
-    if not await _check_and_increment_rate_limit(client_ip):
+    install_id_key = (req.install_id or '').strip() or None
+    if not await _check_and_increment_rate_limit(client_ip, install_id_key):
         raise HTTPException(429, 'Rate limit exceeded. Try again tomorrow.')
 
     try:
@@ -253,12 +311,12 @@ async def contribute(req: ContributeRequest, request: Request):
     if not is_valid_crop(png_bytes):
         raise HTTPException(400, 'Crop rejected: image too uniform or invalid')
 
-    # Reject poison labels at ingress — virtual classes (__empty__,
-    # __inactive__, __boff_*) and leftover dev-test entries must never
-    # reach storage. They previously polluted knowledge.json and caused
-    # Stage 0 to hard-override real icons to "empty/inactive" at conf=1.0.
+    # Poison-label gate at ingress (D-A.1 / D-G.1). The filter is wired
+    # through `_is_poison_label`, which is currently disabled by the
+    # `_POISON_FILTER_ENABLED` flag — see policy block at the top of this
+    # module for rationale and rollback instructions.
     _name = (req.item_name or '').strip()
-    if _name.startswith('__') or _name == 'Test Item Name':
+    if _is_poison_label(_name):
         raise HTTPException(400, f'Crop rejected: label {_name!r} not eligible '
                                  f'for community knowledge')
 
@@ -311,10 +369,10 @@ async def contribute_bulk_crops(req: BulkCropsRequest, request: Request):
     All writes happen in a single HF commit.
     """
     client_ip = _get_client_ip(request)
-    if not await _check_and_increment_rate_limit(client_ip):
+    install_id = req.install_id.strip()
+    if not await _check_and_increment_rate_limit(client_ip, install_id or None):
         raise HTTPException(429, 'Rate limit exceeded. Try again tomorrow.')
 
-    install_id = req.install_id.strip()
     if not _INSTALL_ID_RE.match(install_id):
         raise HTTPException(400, 'Invalid install_id format')
 
@@ -340,7 +398,7 @@ async def contribute_bulk_crops(req: BulkCropsRequest, request: Request):
             rejected += 1
             reasons.append('non-printable name')
             continue
-        if name.startswith('__') or name == 'Test Item Name':
+        if _is_poison_label(name):
             rejected += 1
             reasons.append(f'poison label {name!r}')
             continue
@@ -364,6 +422,15 @@ async def contribute_bulk_crops(req: BulkCropsRequest, request: Request):
         if err:
             rejected += 1
             reasons.append(err)
+            continue
+
+        # D-G.4: image-quality gate (std_dev >= 10) for icon crops only.
+        # Text crops (ship_type_/ship_tier_) are wide low-contrast bands —
+        # std_dev would reject legitimate captures, so skip them here.
+        is_text_crop = any(slot.startswith(p) for p in _TEXT_CROP_PREFIXES)
+        if not is_text_crop and not is_valid_crop(png_bytes):
+            rejected += 1
+            reasons.append('image too uniform')
             continue
 
         sha = hashlib.sha256(png_bytes).hexdigest()[:32]
@@ -405,15 +472,18 @@ async def contribute_bulk_crops(req: BulkCropsRequest, request: Request):
 async def upload_screen_types(req: ScreenTypesRequest, request: Request):
     """Accept a batch of screen-type screenshots for one screen_type label."""
     client_ip = _get_client_ip(request)
-    if not await _check_and_increment_rate_limit(client_ip):
+    install_id  = req.install_id.strip()
+    if not await _check_and_increment_rate_limit(client_ip, install_id or None):
         raise HTTPException(429, 'Rate limit exceeded. Try again tomorrow.')
 
-    install_id  = req.install_id.strip()
     if not _INSTALL_ID_RE.match(install_id):
         raise HTTPException(400, 'Invalid install_id format')
     stype = req.screen_type.strip()
     if not _SCREEN_TYPE_RE.match(stype):
         raise HTTPException(400, 'Invalid screen_type')
+    allowed_screen_types = set(_get_labels().get('screen_types') or [])
+    if allowed_screen_types and stype not in allowed_screen_types:
+        raise HTTPException(400, f'screen_type {stype!r} not in whitelist')
 
     base_dir = f'staging/{install_id}/screen_types/{stype}'
     files_to_upload: dict[str, bytes] = {}
@@ -460,10 +530,10 @@ async def upload_screen_types(req: ScreenTypesRequest, request: Request):
 async def upload_anchors(req: AnchorsRequest, request: Request):
     """Accept a batch of anchor grids (one file per grid, keyed by sha8)."""
     client_ip = _get_client_ip(request)
-    if not await _check_and_increment_rate_limit(client_ip):
+    install_id = req.install_id.strip()
+    if not await _check_and_increment_rate_limit(client_ip, install_id or None):
         raise HTTPException(429, 'Rate limit exceeded. Try again tomorrow.')
 
-    install_id = req.install_id.strip()
     if not _INSTALL_ID_RE.match(install_id):
         raise HTTPException(400, 'Invalid install_id format')
 
@@ -473,31 +543,54 @@ async def upload_anchors(req: AnchorsRequest, request: Request):
     rejected = 0
     reasons: list[str] = []
 
+    labels = _get_labels()
+    allowed_build_types = set(labels.get('screen_types') or [])
+    slot_whitelist      = labels.get('slots') or {}
+
     for grid in req.grids:
         slots = grid.slots
         if len(slots) < 3:
             rejected += 1
             reasons.append('fewer than 3 slots')
             continue
-        # Each bbox must carry the four relative coords; extra keys (step_rel,
-        # count) are preserved for downstream consumers. Multi-column slots use
-        # a nested {y_rel, w_rel, h_rel, runs:[{x0_rel, ...}, ...]} shape where
-        # x0_rel lives inside each run instead of at the top level.
-        def _bbox_ok(v: dict) -> bool:
-            if not isinstance(v, dict):
-                return False
-            if not all(k in v for k in ('y_rel', 'w_rel', 'h_rel')):
-                return False
-            if 'x0_rel' in v:
-                return True
-            runs = v.get('runs')
-            return isinstance(runs, list) and len(runs) > 0 and all(
-                isinstance(r, dict) and 'x0_rel' in r for r in runs
-            )
-        if any(not _bbox_ok(v) for v in slots.values()):
+        bbox_err = next(
+            (err for err in (_anchor_bbox_error(v) for v in slots.values())
+             if err is not None),
+            None,
+        )
+        if bbox_err is not None:
             rejected += 1
-            reasons.append('bbox missing required keys')
+            reasons.append(bbox_err)
             continue
+
+        # D-G.5: aspect range + optional resolution shape.
+        if grid.aspect is not None:
+            a = grid.aspect
+            if not math.isfinite(a) or not (_ANCHOR_ASPECT_MIN <= a <= _ANCHOR_ASPECT_MAX):
+                rejected += 1
+                reasons.append(f'aspect {a!r} out of range '
+                               f'[{_ANCHOR_ASPECT_MIN}, {_ANCHOR_ASPECT_MAX}]')
+                continue
+        if grid.resolution and not _RESOLUTION_RE.match(grid.resolution):
+            rejected += 1
+            reasons.append(f'resolution {grid.resolution!r} not WIDTHxHEIGHT')
+            continue
+
+        # D-G.10: enforce the build_type + slot-name whitelist sourced from
+        # config/labels.json. An empty whitelist (bundled load failed AND HF
+        # unreachable) disables enforcement so we don't black-hole production
+        # traffic on a transient outage — `_get_labels()` logs the warning.
+        if allowed_build_types and grid.build_type not in allowed_build_types:
+            rejected += 1
+            reasons.append(f'build_type {grid.build_type!r} not in whitelist')
+            continue
+        allowed_slots = set(slot_whitelist.get(grid.build_type) or [])
+        if allowed_slots:
+            stray = [k for k in slots.keys() if k not in allowed_slots]
+            if stray:
+                rejected += 1
+                reasons.append(f'slots not in whitelist for {grid.build_type}: {stray[:3]}')
+                continue
 
         payload = {
             'build_type': grid.build_type,
@@ -623,6 +716,46 @@ async def admin_merge(
 
 
 # ── Validation helpers ─────────────────────────────────────────────────────────
+
+def _anchor_coord_value_ok(v: object) -> bool:
+    """Coord values must be finite floats in [0.0, 1.0]."""
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        return False
+    f = float(v)
+    return math.isfinite(f) and 0.0 <= f <= 1.0
+
+
+def _anchor_bbox_error(v: object) -> str | None:
+    """Validate one slot bbox. Returns None if OK, else a short reason.
+
+    Required: dict with y_rel/w_rel/h_rel. Either a top-level x0_rel or a
+    non-empty `runs` list whose entries carry their own x0_rel. All present
+    coord values (incl. optional step_rel) must be finite floats in
+    [0.0, 1.0].
+    """
+    if not isinstance(v, dict):
+        return 'bbox not a dict'
+    for k in ('y_rel', 'w_rel', 'h_rel'):
+        if k not in v:
+            return f'bbox missing {k}'
+        if not _anchor_coord_value_ok(v[k]):
+            return f'bbox {k}={v[k]!r} out of [0.0, 1.0]'
+    if 'step_rel' in v and not _anchor_coord_value_ok(v['step_rel']):
+        return f'bbox step_rel={v["step_rel"]!r} out of [0.0, 1.0]'
+    if 'x0_rel' in v:
+        if not _anchor_coord_value_ok(v['x0_rel']):
+            return f'bbox x0_rel={v["x0_rel"]!r} out of [0.0, 1.0]'
+        return None
+    runs = v.get('runs')
+    if not isinstance(runs, list) or not runs:
+        return 'bbox missing x0_rel and runs'
+    for i, r in enumerate(runs):
+        if not isinstance(r, dict) or 'x0_rel' not in r:
+            return f'runs[{i}] missing x0_rel'
+        if not _anchor_coord_value_ok(r['x0_rel']):
+            return f'runs[{i}] x0_rel={r["x0_rel"]!r} out of [0.0, 1.0]'
+    return None
+
 
 def _check_crop_dims(png_bytes: bytes, slot: str) -> str | None:
     """Validate crop image dimensions. Returns None if OK, else error message.
@@ -772,6 +905,54 @@ def _load_model_version_from_hf() -> dict:
         return {}
 
 
+def _load_labels_bundled() -> dict:
+    """Read the bootstrap labels.json shipped alongside the backend code."""
+    path = Path(__file__).parent / 'config' / 'labels.json'
+    try:
+        return json.loads(path.read_text(encoding='utf-8'))
+    except Exception as e:
+        log.warning(f'bundled labels.json load failed: {e}')
+        return {'schema_version': 1, 'screen_types': [], 'slots': {}}
+
+
+def _load_labels_from_hf() -> dict:
+    """Download config/labels.json from the HF icons dataset.
+
+    Falls back to the repo-bundled copy if HF is unreachable or the file
+    has not been seeded yet. The bundled copy is also returned when
+    `HF_ICONS_REPO_ID` is empty (local dev).
+    """
+    bundled = _load_labels_bundled()
+    if not HF_ICONS_REPO_ID:
+        return bundled
+    try:
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(
+            repo_id=HF_ICONS_REPO_ID,
+            filename='config/labels.json',
+            repo_type='dataset',
+            token=HF_TOKEN or None,
+        )
+        data = json.loads(Path(path).read_text(encoding='utf-8'))
+        if not isinstance(data.get('screen_types'), list):
+            log.warning('HF labels.json missing screen_types[]; using bundled')
+            return bundled
+        return data
+    except Exception as e:
+        log.warning(f'config/labels.json load from HF failed ({e}); using bundled')
+        return bundled
+
+
+def _get_labels() -> dict:
+    """Return the cached whitelist, refreshing from HF on TTL expiry."""
+    global _labels_cache, _labels_cache_ts
+    now = time.time()
+    if not _labels_cache or now - _labels_cache_ts > LABELS_CACHE_TTL:
+        _labels_cache    = _load_labels_from_hf()
+        _labels_cache_ts = now
+    return _labels_cache
+
+
 def _load_knowledge_from_hf() -> dict[str, str]:
     """Download knowledge.json from HF Dataset."""
     if not HF_REPO_ID:
@@ -824,17 +1005,27 @@ def _get_client_ip(request: Request) -> str:
     return request.client.host if request.client else 'unknown'
 
 
-async def _check_and_increment_rate_limit(ip: str) -> bool:
-    """Atomically check and increment rate limit. Returns True if allowed."""
+async def _check_and_increment_rate_limit(ip: str, install_id: str | None = None) -> bool:
+    """Atomically check and increment rate limit. Returns True if allowed.
+
+    Two independent buckets are enforced:
+      - per IP            (cap: MAX_REQ_PER_IP)
+      - per install_id    (cap: MAX_REQ_PER_INSTALL) — only when supplied
+
+    Both must be under cap for the request to be admitted; both are
+    incremented together so a partial pass cannot leave the buckets desynced.
+    """
     async with _rate_limit_lock:
         today = str(date.today())
-        counts = _rate_limit.get(ip, {})
-        if counts.get(today, 0) >= MAX_REQ_PER_IP:
+        if _rate_limit.get(ip, {}).get(today, 0) >= MAX_REQ_PER_IP:
             return False
-        if ip not in _rate_limit:
-            _rate_limit[ip] = {}
-        _rate_limit[ip][today] = _rate_limit[ip].get(today, 0) + 1
-        _rate_limit[ip] = {k: v for k, v in _rate_limit[ip].items() if k >= today}
+        install_key = f'install:{install_id}' if install_id else None
+        if install_key and _rate_limit.get(install_key, {}).get(today, 0) >= MAX_REQ_PER_INSTALL:
+            return False
+        for key in filter(None, (ip, install_key)):
+            bucket = _rate_limit.setdefault(key, {})
+            bucket[today] = bucket.get(today, 0) + 1
+            _rate_limit[key] = {k: v for k, v in bucket.items() if k >= today}
         return True
 
 

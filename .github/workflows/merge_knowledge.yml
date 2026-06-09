@@ -24,9 +24,9 @@ on:
   workflow_dispatch:          # allow manual trigger from GitHub UI
     inputs:
       min_votes:
-        description: 'Minimum vote count for a pHash to merge (existing entries)'
+        description: 'Minimum vote count for a pHash to UPDATE an existing entry (NEW entries always require 1 vote, per Z3 asymmetric policy)'
         required: false
-        default: '1'
+        default: '2'
         type: string
 
 jobs:
@@ -56,5 +56,5 @@ jobs:
           HF_TOKEN:   ${{ secrets.HF_TOKEN }}
           HF_REPO_ID: ${{ secrets.HF_REPO_ID || 'sets-sto/warp-knowledge' }}
         run: |
-          MIN_VOTES="${{ github.event.inputs.min_votes || '1' }}"
+          MIN_VOTES="${{ github.event.inputs.min_votes || '2' }}"
           python admin_merge.py --apply --min "$MIN_VOTES"

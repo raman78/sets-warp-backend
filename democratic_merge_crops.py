@@ -108,20 +108,32 @@ def _load_existing(snap_dir) -> dict[str, dict]:
 
 def _collect_votes(
     snap_dir, since: str | None, repo_files: set[str],
-) -> tuple[dict[str, Counter], dict[str, Counter], dict[str, str], dict[str, int]]:
+) -> tuple[
+    dict[str, Counter],
+    dict[str, Counter],
+    dict[str, str],
+    dict[str, int],
+    dict[str, set[str]],
+    dict[str, list[dict]],
+]:
     """
     Tally votes from staging annotations in the local shallow clone.
 
-    Returns (name_votes, slot_votes, crop_src, per_install):
-      - name_votes[sha][name]  → count of distinct install_ids voting for name
-      - slot_votes[sha][slot]  → same, for slot
-      - crop_src[sha]          → first staging path that has this crop PNG
-      - per_install[install_id]→ number of entries contributed by that install
+    Returns (name_votes, slot_votes, crop_src, per_install,
+             contributors_for_sha, staging_records):
+      - name_votes[sha][name]   → count of distinct install_ids voting for name
+      - slot_votes[sha][slot]   → same, for slot
+      - crop_src[sha]           → first staging path that has this crop PNG
+      - per_install[install_id] → number of entries contributed by that install
+      - contributors_for_sha[sha] → install_ids whose annotations voted on sha
+        (used by drain — delete staging/<iid>/crops/<sha>.png after promotion)
+      - staging_records[install_id] → raw annotation dicts kept for the
+        staging rewrite (drain trims entries whose sha was promoted)
     """
     root = Path(snap_dir) / 'staging'
     if not root.exists():
         print(f'WARNING: no staging/ folder at {root}')
-        return {}, {}, {}, {}
+        return {}, {}, {}, {}, {}, {}
 
     anno_files = sorted(root.glob('*/annotations.jsonl'))
     print(f'Found {len(anno_files)} contributors with annotations.')
@@ -130,6 +142,8 @@ def _collect_votes(
     slot_votes: dict[str, Counter] = defaultdict(Counter)
     crop_src:   dict[str, str]     = {}
     per_install: dict[str, int]    = {}
+    contributors_for_sha: dict[str, set[str]] = defaultdict(set)
+    staging_records:      dict[str, list[dict]] = {}
 
     for f in repo_files:
         if f.startswith('staging/') and f.endswith('.png'):
@@ -139,6 +153,7 @@ def _collect_votes(
         install_id = af.parent.name
 
         seen_in_install: set[tuple[str, str, str]] = set()
+        records: list[dict] = []
         n_entries = 0
         try:
             with open(af, encoding='utf-8') as f:
@@ -150,6 +165,7 @@ def _collect_votes(
                         e = json.loads(line)
                     except Exception:
                         continue
+                    records.append(e)
                     sha  = (e.get('crop_sha256') or '').strip()
                     name = (e.get('name') or '').strip()
                     slot = (e.get('slot') or '').strip()
@@ -169,13 +185,16 @@ def _collect_votes(
                     name_votes[sha][name] += 1
                     if slot:
                         slot_votes[sha][slot] += 1
+                    contributors_for_sha[sha].add(install_id)
                     n_entries += 1
         except Exception as e:
             print(f'  SKIP {install_id}: {e}')
             continue
         per_install[install_id] = n_entries
+        staging_records[install_id] = records
 
-    return name_votes, slot_votes, crop_src, per_install
+    return (name_votes, slot_votes, crop_src, per_install,
+            contributors_for_sha, staging_records)
 
 
 def _merge(
@@ -184,8 +203,14 @@ def _merge(
     existing:   dict[str, dict],
     min_votes:  int,
     verbose:    bool,
-) -> tuple[dict[str, dict], list[dict]]:
-    """Majority vote. Returns (merged, report_rows)."""
+) -> tuple[dict[str, dict], list[dict], set[str]]:
+    """Majority vote. Returns (merged, report_rows, promoted_shas).
+
+    `promoted_shas` is the set this run actually accepted (NEW + UPDATE +
+    unchanged). The drain in `_apply` uses this set so staging is cleaned
+    even when the consensus was already reflected in data/ — those votes
+    have done their job and should not be re-tallied next run.
+    """
     # Drop legacy poison entries from existing (one-shot self-heal).
     merged = {sha: rec for sha, rec in existing.items()
               if not _is_poison_name((rec.get('name') or ''))}
@@ -194,6 +219,7 @@ def _merge(
         print(f'[clean] dropped {dropped_poison} legacy poison entries')
 
     report: list[dict] = []
+    promoted_shas: set[str] = set()
 
     for sha, votes in sorted(name_votes.items()):
         winner, count = votes.most_common(1)[0]
@@ -214,7 +240,8 @@ def _merge(
 
             slot_c = slot_votes.get(sha) or Counter()
             slot   = slot_c.most_common(1)[0][0] if slot_c else ''
-            merged[sha] = {
+            losers_dict = {n: v for n, v in votes.most_common()[1:4] if n != winner}
+            entry: dict = {
                 'crop_sha256': sha,
                 'name':        winner,
                 'slot':        slot,
@@ -222,6 +249,12 @@ def _merge(
                 'updated_at':  datetime.now(UTC).isoformat(timespec='seconds')
                                                 .replace('+00:00', 'Z'),
             }
+            if losers_dict:
+                # D-A.3: persisted dissent — minority votes preserved in
+                # data/ so downstream audits can see consensus strength.
+                entry['losers'] = losers_dict
+            merged[sha] = entry
+            promoted_shas.add(sha)
 
         row = {
             'sha':      sha,
@@ -240,7 +273,7 @@ def _merge(
         if verbose or action in ('NEW', 'UPDATE', 'SKIP'):
             _print_row(row)
 
-    return merged, report
+    return merged, report, promoted_shas
 
 
 def _print_row(row: dict):
@@ -257,14 +290,22 @@ def _print_row(row: dict):
 
 def _apply(
     api, token: str,
-    merged:   dict[str, dict],
-    existing: dict[str, dict],
-    crop_src: dict[str, str],
+    merged:    dict[str, dict],
+    promoted_shas: set[str],
+    existing:  dict[str, dict],
+    crop_src:  dict[str, str],
     repo_files: set[str],
+    contributors_for_sha: dict[str, set[str]],
+    staging_records: dict[str, list[dict]],
 ):
-    """One commit: rewrite data/annotations.jsonl + add any missing crops."""
+    """One commit: rewrite data/annotations.jsonl, copy approved crops, then
+    drain staging — delete staging crop PNGs for promoted sha and rewrite
+    each contributor's annotations.jsonl keeping only the not-promoted lines.
+
+    A single atomic commit so a half-applied state is impossible.
+    """
     from huggingface_hub import (
-        CommitOperationAdd, hf_hub_download,
+        CommitOperationAdd, CommitOperationDelete, hf_hub_download,
     )
 
     # 1. Annotations file (one JSON object per line, sorted by sha for diffability).
@@ -282,6 +323,7 @@ def _apply(
 
     # 2. Copy any approved crop that isn't already in data/crops/.
     missing: list[str] = []
+    new_crops = 0
     for sha in merged:
         dst = f'{DATA_CRP}/{sha}.png'
         if dst in repo_files:
@@ -301,18 +343,56 @@ def _apply(
             path_in_repo    = dst,
             path_or_fileobj = local,
         ))
+        new_crops += 1
 
     if missing:
         print(f'WARNING: {len(missing)} approved sha have no fetchable crop '
               f'— annotations will reference missing files.')
 
-    print(f'Committing: 1 annotations file + {len(ops) - 1} new crops…')
+    # 3. D-A.3 drain — delete staging crop PNGs for promoted sha, and trim
+    # each contributor's annotations.jsonl. Skip sha that failed to copy
+    # (`missing`) so we never delete the only remaining copy of an
+    # annotated crop.
+    safe_promoted = promoted_shas - set(missing)
+    deleted_crops = 0
+    deleted_annos = 0
+    rewritten_annos = 0
+
+    for sha in safe_promoted:
+        for iid in contributors_for_sha.get(sha, ()):
+            staging_png = f'staging/{iid}/crops/{sha}.png'
+            if staging_png in repo_files:
+                ops.append(CommitOperationDelete(path_in_repo=staging_png))
+                deleted_crops += 1
+
+    for iid, records in staging_records.items():
+        kept = [r for r in records
+                if (r.get('crop_sha256') or '').strip() not in safe_promoted]
+        if len(kept) == len(records):
+            continue
+        staging_ann = f'staging/{iid}/annotations.jsonl'
+        if not kept:
+            ops.append(CommitOperationDelete(path_in_repo=staging_ann))
+            deleted_annos += 1
+        else:
+            buf = ('\n'.join(json.dumps(r, ensure_ascii=False) for r in kept)
+                   + '\n').encode('utf-8')
+            ops.append(CommitOperationAdd(
+                path_in_repo    = staging_ann,
+                path_or_fileobj = io.BytesIO(buf),
+            ))
+            rewritten_annos += 1
+
+    print(f'Committing: 1 annotations file + {new_crops} new crops + '
+          f'drain({deleted_crops} stg crops, {rewritten_annos} stg ann '
+          f'trimmed, {deleted_annos} stg ann emptied)…')
     api.create_commit(
         repo_id        = REPO,
         repo_type      = RTYPE,
         operations     = ops,
         commit_message = (f'democratic_merge: {len(merged)} entries '
-                          f'({len(ops) - 1} new crops) '
+                          f'(+{new_crops} new crops, drained '
+                          f'{deleted_crops} staging crops) '
                           f'@ {datetime.now(UTC).strftime("%Y-%m-%d %H:%M")} UTC'),
     )
 
@@ -366,7 +446,8 @@ def main() -> int:
     existing = _load_existing(snap_dir)
     print(f'Existing data/annotations.jsonl: {len(existing)} entries')
 
-    name_votes, slot_votes, crop_src, per_install = _collect_votes(
+    (name_votes, slot_votes, crop_src, per_install,
+     contributors_for_sha, staging_records) = _collect_votes(
         snap_dir, since=args.since, repo_files=repo_files)
     print(f'Contributors: {len(per_install)}   '
           f'unique sha hashes voted on: {len(name_votes)}')
@@ -375,7 +456,7 @@ def main() -> int:
         print('No staging entries to merge — nothing to do.')
         return 0
 
-    merged, report = _merge(
+    merged, report, promoted_shas = _merge(
         name_votes, slot_votes, existing,
         min_votes=args.min, verbose=args.verbose)
 
@@ -403,7 +484,8 @@ def main() -> int:
         print('\nDRY-RUN — use --apply to commit.')
         return 0
 
-    _apply(api, args.token, merged, existing, crop_src, repo_files)
+    _apply(api, args.token, merged, promoted_shas, existing, crop_src,
+           repo_files, contributors_for_sha, staging_records)
     print('OK — committed.')
     return 0
 
