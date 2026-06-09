@@ -41,7 +41,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from admin_train import (  # noqa: E402
     HF_TOKEN, HF_DATASET, HF_REPO_ID,
     IMG_SIZE, MODEL_IMG_SIZE,
-    _require_hf, _list_staging_folders, collect_votes,
+    _require_hf, read_curated_crops,
     _create_commit_with_retry,
 )
 import hashlib  # noqa: E402
@@ -213,28 +213,23 @@ def _build_embedder(prev_model_pt: Path | None = None):
 
 # ── Main training function ───────────────────────────────────────────────────
 
-def train_metric(winner_labels: dict[str, str], sha_source: dict[str, str],
+def train_metric(winner_labels: dict[str, str],
                  models_dir: Path, tmpdir: Path,
                  prev_model_pt: Path | None = None,
                  deadline: float | None = None) -> tuple[float, int]:
     """Mirror of admin_train.train() but with ArcFace + PK sampler.
-    Returns (val_recall@1, n_samples_used)."""
+    Reads crops from data/crops/<sha>.png (curated by
+    democratic_merge_crops.py). Returns (val_recall@1, n_samples_used)."""
     import cv2
     import numpy as np
     import torch
     import torch.nn.functional as F
     import torchvision.transforms as T
 
-    # ── Crop download (identical to admin_train.train()) ─────────────────────
+    # ── Crop download (mirrors admin_train.train()) ──────────────────────────
     import socket as _socket
     import urllib.request as _urllib
     from concurrent.futures import ThreadPoolExecutor as _TPE
-
-    by_iid: dict[str, list[tuple[str, str]]] = defaultdict(list)
-    for sha, label in winner_labels.items():
-        iid = sha_source.get(sha)
-        if iid:
-            by_iid[iid].append((sha, label))
 
     snap_cache = tmpdir / 'snap'
     snap_cache.mkdir(exist_ok=True)
@@ -243,24 +238,23 @@ def train_metric(winner_labels: dict[str, str], sha_source: dict[str, str],
     _opener = _urllib.build_opener()
     _opener.addheaders = [('Authorization', f'Bearer {HF_TOKEN}')] if HF_TOKEN else []
 
-    def _fetch_crop(args: tuple[str, str]) -> bool:
-        iid, sha = args
-        dest = snap_cache / 'staging' / iid / 'crops' / f'{sha}.png'
+    def _fetch_crop(sha: str) -> bool:
+        dest = snap_cache / 'data' / 'crops' / f'{sha}.png'
         if dest.exists():
             return True
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with _opener.open(f'{_hf_base}/staging/{iid}/crops/{sha}.png') as r:
+            with _opener.open(f'{_hf_base}/data/crops/{sha}.png') as r:
                 dest.write_bytes(r.read())
             return True
         except Exception:
             return False
 
-    all_crops = [(iid, sha) for iid, items in by_iid.items() for sha, _ in items]
-    print(f'\nDownloading {len(all_crops)} crops from {len(by_iid)} contributor(s)...')
+    all_shas = list(winner_labels.keys())
+    print(f'\nDownloading {len(all_shas)} crops from data/crops/...')
     _ok = _fail = 0
     with _TPE(max_workers=16) as _pool:
-        for _result in _pool.map(_fetch_crop, all_crops):
+        for _result in _pool.map(_fetch_crop, all_shas):
             if _result:
                 _ok += 1
             else:
@@ -268,17 +262,16 @@ def train_metric(winner_labels: dict[str, str], sha_source: dict[str, str],
     print(f'  {_ok} downloaded, {_fail} failed/skipped.')
 
     crops, labels = [], []
-    for iid, items in by_iid.items():
-        crop_dir = snap_cache / 'staging' / iid / 'crops'
-        for sha, label in items:
-            p = crop_dir / f'{sha}.png'
-            if not p.exists():
-                continue
-            img = cv2.imread(str(p))
-            if img is None:
-                continue
-            crops.append(cv2.resize(img, (IMG_SIZE, IMG_SIZE)))
-            labels.append(label)
+    crop_dir = snap_cache / 'data' / 'crops'
+    for sha, label in winner_labels.items():
+        p = crop_dir / f'{sha}.png'
+        if not p.exists():
+            continue
+        img = cv2.imread(str(p))
+        if img is None:
+            continue
+        crops.append(cv2.resize(img, (IMG_SIZE, IMG_SIZE)))
+        labels.append(label)
 
     return _fit_metric(crops, labels, models_dir, prev_model_pt, deadline)
 
@@ -584,19 +577,13 @@ def main():
     print(f'Min votes: {args.min}')
     print('=' * 60)
 
-    print('\nScanning staging folders...')
-    folders = _list_staging_folders()
-    if not folders:
-        print('No staging contributions found.')
-        return
-    print(f'Found {len(folders)} contributor(s)')
-
-    print('\nLoading annotations and computing democratic votes...')
-    winner_labels, sha_source, n_users = collect_votes(folders)
+    print('\nReading curated crop labels from data/annotations.jsonl...')
+    winner_labels, vote_counts = read_curated_crops()
     if not winner_labels:
-        print('No valid annotations.')
+        print('No curated annotations.')
         return
-    print(f'  {len(winner_labels)} winning crop labels from {n_users} user(s)')
+    peak_votes = max(vote_counts.values(), default=0)
+    print(f'  {len(winner_labels)} crops, peak votes/crop={peak_votes}')
 
     if not args.train:
         print('\nDry-run finished. Use --train to actually train.')
@@ -615,7 +602,7 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix='warp_metric_') as td:
         train_metric(
-            winner_labels, sha_source,
+            winner_labels,
             models_dir=out_dir, tmpdir=Path(td),
             prev_model_pt=prev_pt if prev_pt.exists() else None,
         )

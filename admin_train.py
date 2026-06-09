@@ -156,25 +156,41 @@ def _load_staging_annotations(install_id: str) -> list[dict]:
         return []
 
 
-def _download_crop(install_id: str, sha: str, dest_dir: Path) -> Path | None:
-    """Download staging/<install_id>/crops/<sha>.png to dest_dir. Returns local path."""
+def read_curated_crops() -> tuple[dict[str, str], dict[str, int]]:
+    """Read data/annotations.jsonl (written by democratic_merge_crops.py).
+
+    Returns (sha → name, sha → vote_count). The merger has already enforced
+    Z3 asymmetric thresholds (NEW=1, UPDATE>=2) and dropped poison labels,
+    so the trainer just consumes consensus.
+    """
     from huggingface_hub import hf_hub_download
-    dest = dest_dir / sha
-    if dest.exists():
-        return dest
+
     try:
         local = hf_hub_download(
-            HF_DATASET,
-            f'staging/{install_id}/crops/{sha}.png',
-            repo_type='dataset',
-            token=HF_TOKEN,
+            repo_id=HF_DATASET, filename='data/annotations.jsonl',
+            repo_type='dataset', token=HF_TOKEN,
         )
-        import shutil
-        shutil.copy2(local, dest)
-        return dest
     except Exception as e:
-        log.debug(f'Crop {sha} from {install_id} missing: {e}')
-        return None
+        log.debug(f'data/annotations.jsonl unavailable: {e}')
+        return {}, {}
+
+    labels: dict[str, str] = {}
+    votes:  dict[str, int] = {}
+    for line in Path(local).read_text(encoding='utf-8').splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        sha   = (rec.get('crop_sha256') or '').strip()
+        name  = (rec.get('name') or '').strip()
+        if not (sha and name):
+            continue
+        labels[sha] = name
+        votes[sha]  = int(rec.get('votes') or 1)
+    return labels, votes
 
 
 def _create_commit_with_retry(api, repo_id: str, repo_type: str,
@@ -273,135 +289,65 @@ def _upload_model(models_dir: Path, n_classes: int, val_acc: float,
 
 
 # ── Community anchors (P11) ──────────────────────────────────────────────────
+#
+# PHASE 3 / D-F.2: aggregation lives in democratic_merge_anchors.py now.
+# The trainer reads the curated consensus from data/anchors/<build_type>_<bucket>.json
+# instead of voting on staging itself. This keeps "one source of truth" — every
+# consumer (trainer, future runtime distribution) reads the same files the merger
+# produced.
 
-def _list_anchor_grid_files(folders: list[str]) -> list[tuple[str, str]]:
-    """Return list of (install_id, filename) for all anchors_grid_*.json in staging."""
-    from huggingface_hub import HfApi
+def read_community_anchors() -> list[dict]:
+    """Read consensus anchor entries from data/anchors/*.json on HF_DATASET.
+
+    The merger (democratic_merge_anchors.py) writes one JSON per
+    (build_type, aspect_bucket) with median-aggregated slot coords +
+    spread audit trail. We strip that down to the legacy trainer shape
+    `{type, aspect, res, slots, n_contributors, timestamp}` so the
+    downstream upload step is unchanged.
+    """
+    from huggingface_hub import HfApi, hf_hub_download
+
     api = HfApi(token=HF_TOKEN)
-    result = []
-    for iid in folders:
-        try:
-            tree = api.list_repo_tree(
-                HF_DATASET, path_in_repo=f'staging/{iid}',
-                repo_type='dataset', recursive=False,
-            )
-            for item in tree:
-                p = getattr(item, 'path', '')
-                fname = p.split('/')[-1]
-                if fname.startswith('anchors_grid_') and fname.endswith('.json'):
-                    result.append((iid, fname))
-        except Exception:
-            pass
-    return result
-
-
-def _download_anchor_grid(install_id: str, filename: str) -> dict | None:
-    """Download staging/<install_id>/<filename> and return parsed dict."""
     try:
-        from huggingface_hub import hf_hub_download
-        local = hf_hub_download(
-            repo_id=HF_DATASET,
-            filename=f'staging/{install_id}/{filename}',
-            repo_type='dataset',
-            token=HF_TOKEN,
-        )
-        return json.loads(Path(local).read_text(encoding='utf-8'))
+        tree = list(api.list_repo_tree(
+            HF_DATASET, path_in_repo='data/anchors',
+            repo_type='dataset', recursive=False,
+        ))
     except Exception as e:
-        log.debug(f'anchor grid {install_id}/{filename} unavailable: {e}')
-        return None
-
-
-def build_community_anchors(folders: list[str], min_contributors: int = 2) -> list[dict]:
-    """
-    Aggregate anchor grids from all staging folders.
-    Returns list of community anchor entries (same format as anchors.json learned entries).
-    Accepts groups with exactly 1 contributor (no conflict) or >= min_contributors (consensus).
-    Skips groups with 2..min_contributors-1 (ambiguous — some data but not enough for consensus).
-    With min_contributors=2, all groups n>=1 are accepted (n>1 and n<2 is never true).
-    """
-    from collections import defaultdict
-    import statistics
-
-    grid_files = _list_anchor_grid_files(folders)
-    print(f'Found {len(grid_files)} anchor grid file(s) across {len(folders)} user(s).')
-
-    if not grid_files:
+        log.debug(f'data/anchors listing failed: {e}')
         return []
 
-    # {(build_type, aspect_bucket): {install_id: [grid_entry, ...]}}
-    groups: dict[tuple, dict[str, list]] = defaultdict(lambda: defaultdict(list))
-
-    for install_id, filename in grid_files:
-        entry = _download_anchor_grid(install_id, filename)
-        if not entry:
+    entries: list[dict] = []
+    for item in tree:
+        path = getattr(item, 'path', '')
+        if not path.endswith('.json'):
             continue
-        build_type = entry.get('build_type', '')
-        aspect     = entry.get('aspect')
-        if not build_type or aspect is None:
+        try:
+            local = hf_hub_download(
+                repo_id=HF_DATASET, filename=path,
+                repo_type='dataset', token=HF_TOKEN,
+            )
+            body = json.loads(Path(local).read_text(encoding='utf-8'))
+        except Exception as e:
+            log.debug(f'{path} unavailable: {e}')
             continue
-        # Bucket aspect to 2 decimal places for grouping
-        aspect_bucket = round(float(aspect), 2)
-        groups[(build_type, aspect_bucket)][install_id].append(entry)
-
-    results = []
-    for (build_type, aspect_bucket), contributors in groups.items():
-        n = len(contributors)
-        # Accept sole contributor (no conflict) or consensus (>= min_contributors).
-        # Skip only when 2..min_contributors-1: some data but not enough for reliable consensus.
-        if n > 1 and n < min_contributors:
-            print(f'  Skipping {build_type} aspect={aspect_bucket}: '
-                  f'{n} contributor(s) < {min_contributors} required')
+        build_type = (body.get('build_type') or '').strip()
+        aspect     = body.get('aspect_bucket')
+        slots      = body.get('slots') or {}
+        if not (build_type and aspect is not None and slots):
             continue
-
-        # Collect all slot data across all contributors
-        slot_vectors: dict[str, list[dict]] = defaultdict(list)
-        resolutions: list[str] = []
-        for iid, entries in contributors.items():
-            for e in entries:
-                slots = e.get('slots', {})
-                for slot_name, geo in slots.items():
-                    if isinstance(geo, dict):
-                        slot_vectors[slot_name].append(geo)
-                if e.get('resolution'):
-                    resolutions.append(e['resolution'])
-
-        # Median per slot per component
-        aggregated_slots = {}
-        for slot_name, geos in slot_vectors.items():
-            if len(geos) < 1:
-                continue
-            def _med(key):
-                vals = [g[key] for g in geos if key in g]
-                return round(statistics.median(vals), 5) if vals else None
-            entry_out = {
-                'x0_rel':   _med('x0_rel'),
-                'y_rel':    _med('y_rel'),
-                'w_rel':    _med('w_rel'),
-                'h_rel':    _med('h_rel'),
-                'step_rel': _med('step_rel'),
-                'count':    round(statistics.median(counts)) if (counts := [g['count'] for g in geos if 'count' in g]) else 1,
-            }
-            if None not in entry_out.values():
-                aggregated_slots[slot_name] = entry_out
-
-        if not aggregated_slots:
-            continue
-
-        # Pick most common resolution as representative
-        rep_res = max(set(resolutions), key=resolutions.count) if resolutions else ''
-
-        results.append({
-            'type':          build_type,
-            'aspect':        aspect_bucket,
-            'res':           rep_res,
-            'slots':         aggregated_slots,
-            'n_contributors': len(contributors),
-            'timestamp':     int(__import__('time').time()),
+        entries.append({
+            'type':           build_type,
+            'aspect':         float(aspect),
+            'res':            body.get('representative_resolution', ''),
+            'slots':          slots,
+            'n_contributors': int(body.get('n_contributors') or 1),
+            'timestamp':      int(time.time()),
         })
-        print(f'  Community anchor: {build_type} aspect={aspect_bucket} '
-              f'({len(contributors)} contributors, {len(aggregated_slots)} slots)')
+        print(f'  Loaded community anchor: {build_type} aspect={aspect} '
+              f'({entries[-1]["n_contributors"]} contributors, {len(slots)} slots)')
 
-    return results
+    return entries
 
 
 def upload_community_anchors(entries: list[dict], models_dir: Path) -> bool:
@@ -434,81 +380,49 @@ def upload_community_anchors(entries: list[dict], models_dir: Path) -> bool:
 
 
 # ── Ship Type / Tier OCR correction map ──────────────────────────────────────
+#
+# PHASE 3 / D-E.5: voting + tier-poison filtering lives in
+# democratic_merge_screens.py now. The trainer reads the curated
+# data/text_corrections.jsonl (one consensus winner per ml_name) and
+# re-publishes it as models/ship_type_corrections.json on the knowledge
+# repo. No staging traversal here anymore.
 
-def collect_text_corrections(staging_folders: list[str], models_dir: Path) -> None:
-    """
-    Build and upload ship_type_corrections.json from Ship Type / Ship Tier annotations.
+def publish_text_corrections(models_dir: Path) -> None:
+    """Read data/text_corrections.jsonl (consensus already filtered for
+    tier-poison upstream) and upload models/ship_type_corrections.json."""
+    from huggingface_hub import HfApi, CommitOperationAdd, hf_hub_download
 
-    For each (ml_name, name) pair where ml_name != '' and ml_name != name:
-      - 1 vote per install_id
-      - majority winner per ml_name key → corrections dict
-    Uploads to HF as models/ship_type_corrections.json.
-
-    Ship Tier has a closed 11-entry vocabulary, so we filter aggressively:
-    any vote where the OCR key is already a canonical tier (e.g.
-    'T6-X2' → 'T1') is dropped — that pair can only come from a
-    misannotated tier crop and would poison every client until the next
-    train cycle. Same for non-tier-shaped keys mapping to a tier.
-    """
-    from huggingface_hub import HfApi, CommitOperationAdd
-
-    _TEXT_LEARNING_SLOTS = {'Ship Type', 'Ship Tier'}
-    _CANONICAL_TIERS = frozenset({
-        'T1', 'T2', 'T3', 'T4', 'T5', 'T5-U', 'T5-X', 'T5-X2',
-        'T6', 'T6-X', 'T6-X2',
-    })
-
-    def _is_tier_poison(key: str, val: str) -> bool:
-        # valid → anything = always poison (OCR already nailed it).
-        if key in _CANONICAL_TIERS:
-            return True
-        # garbage → tier is fine ('IT6-X21' → 'T6-X2'), but only when key
-        # is tier-shaped: short, no whitespace. Ship-name → tier is a
-        # category cross-over, always wrong.
-        if val in _CANONICAL_TIERS and (' ' in key or len(key) > 12):
-            return True
-        return False
-
-    # ml_name -> {install_id -> corrected_name}
-    votes: dict[str, dict[str, str]] = defaultdict(dict)
-    rejected = 0
-
-    for iid in staging_folders:
-        anns = _load_staging_annotations(iid)
-        for entry in anns:
-            if entry.get('slot') not in _TEXT_LEARNING_SLOTS:
-                continue
-            ml_name = entry.get('ml_name', '').strip()
-            name    = entry.get('name', '').strip()
-            if not (ml_name and name and ml_name != name):
-                continue
-            if _is_tier_poison(ml_name, name):
-                rejected += 1
-                continue
-            votes[ml_name][iid] = name  # 1 install_id = 1 vote
-
-    if rejected:
-        print(f'  Rejected {rejected} tier-poison vote(s) at ingest.')
-
-    if not votes:
-        print('  No OCR correction pairs found — ship_type_corrections.json not updated.')
+    try:
+        local = hf_hub_download(
+            repo_id=HF_DATASET, filename='data/text_corrections.jsonl',
+            repo_type='dataset', token=HF_TOKEN,
+        )
+    except Exception as e:
+        print(f'  data/text_corrections.jsonl unavailable ({e}) — '
+              f'ship_type_corrections.json not updated.')
         return
 
     corrections: dict[str, str] = {}
-    for ml_name, iid_votes in votes.items():
-        label_counts = Counter(iid_votes.values())
-        winner, _ = label_counts.most_common(1)[0]
-        # Re-check after majority vote in case a poisoned target won the
-        # ballot (e.g. ml_name 'T6-X' with a 1-vote 'T1' override).
-        if _is_tier_poison(ml_name, winner):
+    for line in Path(local).read_text(encoding='utf-8').splitlines():
+        line = line.strip()
+        if not line:
             continue
-        corrections[ml_name] = winner
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        ml_name = (rec.get('ml_name') or '').strip()
+        name    = (rec.get('name') or '').strip()
+        if ml_name and name and ml_name != name:
+            corrections[ml_name] = name
 
-    print(f'  Built {len(corrections)} OCR correction(s).')
+    if not corrections:
+        print('  No OCR corrections in data/text_corrections.jsonl — skip upload.')
+        return
+
+    print(f'  Loaded {len(corrections)} OCR correction(s) from data/.')
 
     payload_bytes = json.dumps(corrections, indent=2, ensure_ascii=False).encode('utf-8')
-
-    # Save locally for reference
     local_path = models_dir / 'ship_type_corrections.json'
     local_path.write_bytes(payload_bytes)
 
@@ -523,125 +437,79 @@ def collect_text_corrections(staging_folders: list[str], models_dir: Path) -> No
         log.info(f'ship_type_corrections.json uploaded ({len(corrections)} entries)')
 
 
-# ── Screen classifier helpers ─────────────────────────────────────────────────
+# ── Screen classifier — read curated data/screen_types/ ───────────────────────
 
-def _list_screen_type_files(folders: list[str]) -> list[tuple[str, str, str]]:
+def read_curated_screens() -> tuple[dict[str, str], int]:
+    """Return (sha → stype winning label, n_contributors) from data/screen_types/.
+
+    Reads data/screen_types/metadata.jsonl produced by democratic_merge_screens.py.
+    Per-class cap (SC_MAX_KEEP) is still applied here — bloat avoidance is a
+    training-time choice, not a merge-time one.
     """
-    Return list of (install_id, stype, sha) for all screen type PNGs in staging.
-    Path format: staging/<install_id>/screen_types/<stype>/<sha>.png
-    """
-    from huggingface_hub import HfApi
-    api   = HfApi(token=HF_TOKEN)
-    result = []
+    from huggingface_hub import HfApi, hf_hub_download
 
-    # Optimization: instead of listing the whole repo, list each staging/<id>/screen_types
-    for iid in folders:
-        try:
-            path = f'staging/{iid}/screen_types'
-            # recursive=True here is fine because we are limited to one user's screen_types
-            elements = api.list_repo_tree(HF_DATASET, path_in_repo=path, repo_type='dataset', recursive=True)
-            for e in elements:
-                # e.path: staging/<iid>/screen_types/<stype>/<sha>.png
-                parts = e.path.split('/')
-                if len(parts) == 5 and e.path.endswith('.png'):
-                    stype = parts[3]
-                    sha = parts[4][:-4] # strip .png
-                    result.append((iid, stype, sha))
-        except Exception:
-            # Folder might not exist for this user
-            continue
-
-    if result:
-        return result
-
-    # Fallback (slow, might timeout on large repos)
-    files = list(api.list_repo_files(HF_DATASET, repo_type='dataset'))
-    for f in files:
-        # staging/<install_id>/screen_types/<stype>/<sha>.png
-        parts = f.split('/')
-        if len(parts) == 5 and parts[0] == 'staging' and parts[2] == 'screen_types' and f.endswith('.png'):
-            install_id = parts[1]
-            stype      = parts[3]
-            sha        = parts[4][:-4]  # strip .png
-            result.append((install_id, stype, sha))
-    return result
-
-
-def _download_screen_shot(install_id: str, stype: str, sha: str, dest_dir: Path) -> Path | None:
-    """Download staging/<install_id>/screen_types/<stype>/<sha>.png to dest_dir."""
-    from huggingface_hub import hf_hub_download
-    dest = dest_dir / f'{sha}.png'
-    if dest.exists():
-        return dest
+    api = HfApi(token=HF_TOKEN)
     try:
         local = hf_hub_download(
-            HF_DATASET,
-            f'staging/{install_id}/screen_types/{stype}/{sha}.png',
-            repo_type='dataset',
-            token=HF_TOKEN,
+            repo_id=HF_DATASET, filename='data/screen_types/metadata.jsonl',
+            repo_type='dataset', token=HF_TOKEN,
         )
-        import shutil
-        shutil.copy2(local, dest)
-        return dest
     except Exception as e:
-        log.debug(f'Screen shot {sha} from {install_id}/{stype} missing: {e}')
-        return None
+        log.debug(f'data/screen_types/metadata.jsonl unavailable: {e}')
+        return {}, 0
 
-
-def collect_screen_type_votes(all_files: list[tuple[str, str, str]]) -> tuple[dict[str, tuple[str, str]], int]:
-    """
-    Apply democratic voting to screen type screenshots.
-
-    Returns:
-        winner_map:  {sha -> (winning_stype, install_id_that_uploaded_it)}
-        n_users:     number of install_ids that contributed at least one screenshot
-    """
-    # sha -> {install_id -> stype}  (each install_id casts 1 vote per sha)
-    sha_votes: dict[str, dict[str, str]] = defaultdict(dict)
-    sha_source: dict[str, str] = {}
-
-    for install_id, stype, sha in all_files:
-        if stype not in SCREEN_TYPES:
+    winner_map: dict[str, str] = {}
+    contributor_total = 0
+    for line in Path(local).read_text(encoding='utf-8').splitlines():
+        line = line.strip()
+        if not line:
             continue
-        sha_votes[sha][install_id] = stype
-        sha_source.setdefault(sha, install_id)
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        sha   = (rec.get('sha') or '').strip()
+        stype = (rec.get('type') or '').strip()
+        if not (sha and stype and stype in SCREEN_TYPES):
+            continue
+        winner_map[sha] = stype
+        contributor_total = max(contributor_total, int(rec.get('votes') or 0))
 
-    n_users = len({iid for iid, _, _ in all_files})
-
-    winner_map: dict[str, tuple[str, str]] = {}
-    for sha, votes in sha_votes.items():
-        label_counts = Counter(votes.values())
-        winner, _ = label_counts.most_common(1)[0]
-        winner_map[sha] = (winner, sha_source[sha])
-
-    # Per-class cap: if a screen type has >= SC_MIN_KEEP samples, keep only
-    # SC_MAX_KEEP (random selection — avoids bloat for stable UI screens).
+    # Per-class cap (mirrors the old behaviour).
     import random as _random
     by_class: dict[str, list[str]] = defaultdict(list)
-    for sha, (stype, _) in winner_map.items():
+    for sha, stype in winner_map.items():
         by_class[stype].append(sha)
 
-    capped: dict[str, tuple[str, str]] = {}
+    capped: dict[str, str] = {}
     for stype, shas in by_class.items():
         if len(shas) >= SC_MIN_KEEP and len(shas) > SC_MAX_KEEP:
             _random.shuffle(shas)
             shas = shas[:SC_MAX_KEEP]
-            print(f'  Screen type {stype}: capped to {SC_MAX_KEEP} of {len(by_class[stype])} samples')
+            print(f'  Screen type {stype}: capped to {SC_MAX_KEEP} of '
+                  f'{len(by_class[stype])} samples')
         for sha in shas:
             capped[sha] = winner_map[sha]
 
-    return capped, n_users
+    return capped, contributor_total
 
 
 def train_screen_classifier(
-    winner_map: dict[str, tuple[str, str]],
+    winner_map: dict[str, str],
     models_dir: Path,
     tmpdir: Path,
     prev_model_pt: Path | None = None,
     deadline: float | None = None,
 ) -> tuple[float, int]:
     """
-    Download winning screenshots, fine-tune MobileNetV3-Small, save to models_dir.
+    Download winning screenshots from data/screen_types/, fine-tune
+    MobileNetV3-Small, save to models_dir.
+
+    `winner_map` is now `dict[sha, stype]` — the merger
+    (democratic_merge_screens.py) already promoted each sha into
+    data/screen_types/<stype>/<sha>.png, so the URL is fully
+    determined by (stype, sha). No install_id involved.
+
     Returns (best_val_acc, n_samples_used).
     """
     import cv2
@@ -654,18 +522,10 @@ def train_screen_classifier(
 
     _log_sc.getLogger('httpx').setLevel(_log_sc.WARNING)
 
-    from collections import defaultdict as _dd_sc2
-
-    # ── Collect screenshots (bulk download per install_id) ────────────────────
-    # Group by install_id so we can snapshot-download entire screen_types folders
-    by_iid_sc: dict[str, list[tuple[str, str]]] = _dd_sc2(list)
-    for sha, (stype, iid) in winner_map.items():
-        by_iid_sc[iid].append((sha, stype))
-
     snap_sc = tmpdir / 'snap_sc'
     snap_sc.mkdir(exist_ok=True)
 
-    print(f'\nDownloading {len(winner_map)} screenshots from {len(by_iid_sc)} contributor(s)...')
+    print(f'\nDownloading {len(winner_map)} screenshots from data/screen_types/...')
     import socket as _socket_sc
     import urllib.request as _urllib_sc
     from concurrent.futures import ThreadPoolExecutor as _TPE_sc
@@ -676,21 +536,21 @@ def train_screen_classifier(
     if HF_TOKEN:
         _opener_sc.addheaders = [('Authorization', f'Bearer {HF_TOKEN}')]
 
-    def _fetch_screen(args: tuple[str, str, str]) -> bool:
-        iid, sha, stype = args
-        dest = snap_sc / 'staging' / iid / 'screen_types' / stype / f'{sha}.png'
+    def _fetch_screen(args: tuple[str, str]) -> bool:
+        sha, stype = args
+        dest = snap_sc / 'data' / 'screen_types' / stype / f'{sha}.png'
         if dest.exists():
             return True
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
-            url = f'{_hf_base_sc}/staging/{iid}/screen_types/{stype}/{sha}.png'
+            url = f'{_hf_base_sc}/data/screen_types/{stype}/{sha}.png'
             with _opener_sc.open(url) as r:
                 dest.write_bytes(r.read())
             return True
         except Exception:
             return False
 
-    _sc_tasks = [(iid, sha, stype) for sha, (stype, iid) in winner_map.items()]
+    _sc_tasks = list(winner_map.items())
     _sc_ok = _sc_fail = 0
     with _TPE_sc(max_workers=16) as _pool_sc:
         for _r in _pool_sc.map(_fetch_screen, _sc_tasks):
@@ -701,16 +561,15 @@ def train_screen_classifier(
     print(f'  {_sc_ok} downloaded, {_sc_fail} failed/skipped.')
 
     images, labels = [], []
-    for iid, items in by_iid_sc.items():
-        for sha, stype in items:
-            p = snap_sc / 'staging' / iid / 'screen_types' / stype / f'{sha}.png'
-            if not p.exists():
-                continue
-            img = cv2.imread(str(p))
-            if img is None:
-                continue
-            images.append(cv2.resize(img, (SC_IMG_SIZE, SC_IMG_SIZE)))
-            labels.append(stype)
+    for sha, stype in winner_map.items():
+        p = snap_sc / 'data' / 'screen_types' / stype / f'{sha}.png'
+        if not p.exists():
+            continue
+        img = cv2.imread(str(p))
+        if img is None:
+            continue
+        images.append(cv2.resize(img, (SC_IMG_SIZE, SC_IMG_SIZE)))
+        labels.append(stype)
 
     print(f'{len(images)}/{len(winner_map)} screenshots loaded.')
     n = len(images)
@@ -901,59 +760,20 @@ def train_screen_classifier(
     return best_val_acc, n
 
 
-# ── Democratic voting ─────────────────────────────────────────────────────────
-
-def collect_votes(staging_folders: list[str]) -> tuple[dict[str, str], dict[str, str], int]:
-    """
-    Download all staging annotations and apply democratic label voting.
-
-    Returns:
-        winner_labels:  {crop_sha256 -> winning_label}
-        winner_sources: {crop_sha256 -> install_id_that_uploaded_this_crop}
-        n_users:        number of install_ids that contributed at least one crop
-    """
-    # sha -> {install_id -> label}  (last label wins per install_id)
-    sha_votes: dict[str, dict[str, str]] = defaultdict(dict)
-    # sha -> install_id (who uploaded this crop file)
-    sha_source: dict[str, str] = {}
-
-    # Slots whose annotations are NOT for icon training.
-    # Ship Type and Ship Tier crops feed ship_type_corrections.json instead.
-    _TEXT_LEARNING_SLOTS = {'Ship Type', 'Ship Tier'}
-
-    n_with_data = 0
-    for iid in staging_folders:
-        anns = _load_staging_annotations(iid)
-        if not anns:
-            continue
-        n_with_data += 1
-        for entry in anns:
-            if entry.get('slot') in _TEXT_LEARNING_SLOTS:
-                continue  # handled by collect_text_corrections(), not icon training
-            sha   = entry.get('crop_sha256', '').strip()
-            label = entry.get('name', '').strip()
-            if sha and label:
-                sha_votes[sha][iid] = label  # 1 install_id = 1 vote
-                sha_source.setdefault(sha, iid)  # record first uploader
-
-    winner_labels: dict[str, str] = {}
-    for sha, votes in sha_votes.items():
-        # Count votes per label, majority wins; ties go to first encountered
-        label_counts = Counter(votes.values())
-        winner, _ = label_counts.most_common(1)[0]
-        winner_labels[sha] = winner
-
-    return winner_labels, sha_source, n_with_data
-
-
 # ── Training ──────────────────────────────────────────────────────────────────
+#
+# PHASE 3 / D-C.1: voting + label deduplication lives in
+# democratic_merge_crops.py. The trainer reads the curated
+# data/annotations.jsonl + data/crops/<sha>.png artefact (Z1: one source
+# of truth) and trains. No staging traversal here anymore.
 
-def train(winner_labels: dict[str, str], sha_source: dict[str, str],
+def train(winner_labels: dict[str, str],
           models_dir: Path, tmpdir: Path,
           prev_model_pt: Path | None = None,
           deadline: float | None = None) -> tuple[float, int]:
     """
-    Download winning crops, train EfficientNet-B0, save model to models_dir.
+    Download winning crops from data/crops/, train EfficientNet-B0, save
+    model to models_dir.
 
     prev_model_pt: path to a previously-trained icon_classifier.pt — its
     backbone weights are loaded (strict=False) for warm-start fine-tuning.
@@ -973,15 +793,7 @@ def train(winner_labels: dict[str, str], sha_source: dict[str, str],
     # killing stalled TCP reads that httpx/snapshot_download cannot time out.
     import socket as _socket
     import urllib.request as _urllib
-    from collections import defaultdict as _dd3
     from concurrent.futures import ThreadPoolExecutor as _TPE
-
-    # Group by install_id
-    by_iid: dict[str, list[tuple[str, str]]] = _dd3(list)
-    for sha, label in winner_labels.items():
-        iid = sha_source.get(sha)
-        if iid:
-            by_iid[iid].append((sha, label))
 
     snap_cache = tmpdir / 'snap'
     snap_cache.mkdir(exist_ok=True)
@@ -992,24 +804,23 @@ def train(winner_labels: dict[str, str], sha_source: dict[str, str],
     _opener = _urllib.build_opener()
     _opener.addheaders = _auth_headers
 
-    def _fetch_crop(args: tuple[str, str]) -> bool:
-        iid, sha = args
-        dest = snap_cache / 'staging' / iid / 'crops' / f'{sha}.png'
+    def _fetch_crop(sha: str) -> bool:
+        dest = snap_cache / 'data' / 'crops' / f'{sha}.png'
         if dest.exists():
             return True
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with _opener.open(f'{_hf_base}/staging/{iid}/crops/{sha}.png') as r:
+            with _opener.open(f'{_hf_base}/data/crops/{sha}.png') as r:
                 dest.write_bytes(r.read())
             return True
         except Exception:
             return False
 
-    all_crops = [(iid, sha) for iid, items in by_iid.items() for sha, _ in items]
-    print(f'\nDownloading {len(all_crops)} crops from {len(by_iid)} contributor(s)...')
+    all_shas = list(winner_labels.keys())
+    print(f'\nDownloading {len(all_shas)} crops from data/crops/...')
     _ok = _fail = 0
     with _TPE(max_workers=16) as _pool:
-        for _result in _pool.map(_fetch_crop, all_crops):
+        for _result in _pool.map(_fetch_crop, all_shas):
             if _result:
                 _ok += 1
             else:
@@ -1017,19 +828,18 @@ def train(winner_labels: dict[str, str], sha_source: dict[str, str],
     print(f'  {_ok} downloaded, {_fail} failed/skipped.')
 
     crops, labels = [], []
-    for iid, items in by_iid.items():
-        crop_dir = snap_cache / 'staging' / iid / 'crops'
-        for sha, label in items:
-            p = crop_dir / f'{sha}.png'
-            if not p.exists():
-                continue
-            img = cv2.imread(str(p))
-            if img is None:
-                continue
-            crops.append(cv2.resize(img, (IMG_SIZE, IMG_SIZE)))
-            labels.append(label)
+    crop_dir = snap_cache / 'data' / 'crops'
+    for sha, label in winner_labels.items():
+        p = crop_dir / f'{sha}.png'
+        if not p.exists():
+            continue
+        img = cv2.imread(str(p))
+        if img is None:
+            continue
+        crops.append(cv2.resize(img, (IMG_SIZE, IMG_SIZE)))
+        labels.append(label)
 
-    print(f'{len(crops)}/{sum(len(v) for v in by_iid.values())} crops loaded.')
+    print(f'{len(crops)}/{len(winner_labels)} crops loaded.')
     n = len(crops)
     print(f'{n} crops ready.')
     if n < MIN_SAMPLES:
@@ -1300,21 +1110,17 @@ Environment (.env or env vars in CI):
         print('Force retrain: ON')
     print('=' * 60)
 
-    # 1. Find staging folders
-    print('\nScanning staging folders...')
-    folders = _list_staging_folders()
-    if not folders:
-        print('No staging contributions found — nothing to do.')
-        return
-    print(f'Found {len(folders)} contributor(s): {folders[:5]}{"..." if len(folders) > 5 else ""}')
-
-    # 2. Collect votes
-    print('\nLoading annotations and computing democratic votes...')
-    winner_labels, sha_source, n_users = collect_votes(folders)
+    # 1. Read curated consensus from data/annotations.jsonl (Z1: one source of
+    # truth — the merger has already enforced Z3 thresholds and dropped poison).
+    print('\nReading curated crop labels from data/annotations.jsonl...')
+    winner_labels, vote_counts = read_curated_crops()
 
     if not winner_labels:
-        print('No valid annotations found — nothing to do.')
+        print('No curated annotations found — nothing to do.')
         return
+
+    print(f'  {len(winner_labels)} crops, '
+          f'avg votes/crop={sum(vote_counts.values())/max(len(vote_counts),1):.1f}')
 
     # 2b. Skip-if-unchanged / MIN_NEW_CROPS check (fast path before downloading)
     if args.skip_if_unchanged and args.train and not args.force:
@@ -1329,22 +1135,13 @@ Environment (.env or env vars in CI):
             return
         print(f'{new_count} new crop(s) since last training — proceeding.')
 
-    # Apply min-votes filter
+    # Apply min-votes filter — re-read from data/ since vote counts are stamped
+    # on each consensus entry (no staging traversal needed).
     if args.min > 1:
         print(f'\nApplying min-votes={args.min} filter...')
-        from collections import defaultdict as _dd
-        sha_vote_counts: dict[str, int] = {}
-        sha_votes_full: dict[str, dict[str, str]] = _dd(dict)
-        for iid in folders:
-            for entry in _load_staging_annotations(iid):
-                sha   = entry.get('crop_sha256', '').strip()
-                label = entry.get('name', '').strip()
-                if sha and label:
-                    sha_votes_full[sha][iid] = label
         winner_labels = {
-            sha: label
-            for sha, label in winner_labels.items()
-            if len(sha_votes_full[sha]) >= args.min
+            sha: label for sha, label in winner_labels.items()
+            if vote_counts.get(sha, 1) >= args.min
         }
         print(f'{len(winner_labels)} crops pass the {args.min}-vote threshold.')
 
@@ -1399,31 +1196,28 @@ Environment (.env or env vars in CI):
         _train_deadline = time.monotonic() + 50 * 60
 
         print('\nTraining EfficientNet-B0 (icon classifier)...')
-        val_acc, n_samples = train(winner_labels, sha_source, models_dir, tmpdir,
+        val_acc, n_samples = train(winner_labels, models_dir, tmpdir,
                                    prev_model_pt=prev_icon_pt, deadline=_train_deadline)
 
         # Train screen_classifier if data available
         sc_val_acc: float | None = None
         sc_n_samples = 0
-        print('\nScanning screen type staging data...')
+        print('\nReading curated screen-type consensus from data/screen_types/...')
         try:
-            sc_files = _list_screen_type_files(folders)
-            print(f'Found {len(sc_files)} screen type screenshot(s) across all users.')
-            if sc_files:
-                sc_winner_map, sc_n_users = collect_screen_type_votes(sc_files)
-                sc_counts = Counter(stype for stype, _ in sc_winner_map.values())
-                print(f'{len(sc_winner_map)} unique screenshots, {len(sc_counts)} classes: '
-                      + ', '.join(f'{k}={v}' for k, v in sorted(sc_counts.items())))
-                if len(sc_winner_map) >= SC_MIN_SAMPLES:
-                    print(f'\nTraining MobileNetV3-Small (screen classifier, {sc_n_users} user(s))...')
-                    # Separate 8-min deadline — screen classifier is fast (lightweight model,
-                    # small dataset) and must not share the icon classifier's exhausted budget.
-                    _sc_deadline = time.monotonic() + 8 * 60
-                    sc_val_acc, sc_n_samples = train_screen_classifier(
-                        sc_winner_map, models_dir, tmpdir, prev_model_pt=prev_sc_pt,
-                        deadline=_sc_deadline)
-                else:
-                    print(f'Not enough screen type data ({len(sc_winner_map)} < {SC_MIN_SAMPLES}) — skipping screen classifier training.')
+            sc_winner_map, sc_max_votes = read_curated_screens()
+            sc_counts = Counter(sc_winner_map.values())
+            print(f'{len(sc_winner_map)} unique screenshots, {len(sc_counts)} classes: '
+                  + ', '.join(f'{k}={v}' for k, v in sorted(sc_counts.items())))
+            if len(sc_winner_map) >= SC_MIN_SAMPLES:
+                print(f'\nTraining MobileNetV3-Small (screen classifier, peak {sc_max_votes} vote(s) per sha)...')
+                # Separate 8-min deadline — screen classifier is fast (lightweight model,
+                # small dataset) and must not share the icon classifier's exhausted budget.
+                _sc_deadline = time.monotonic() + 8 * 60
+                sc_val_acc, sc_n_samples = train_screen_classifier(
+                    sc_winner_map, models_dir, tmpdir, prev_model_pt=prev_sc_pt,
+                    deadline=_sc_deadline)
+            else:
+                print(f'Not enough screen type data ({len(sc_winner_map)} < {SC_MIN_SAMPLES}) — skipping screen classifier training.')
         except Exception as e:
             print(f'WARNING: screen classifier training failed: {e}', file=sys.stderr)
 
@@ -1431,8 +1225,12 @@ Environment (.env or env vars in CI):
         # Save training manifest (so next run can skip if nothing changed)
         _save_training_manifest(set(winner_labels.keys()), models_dir)
 
+        # `n_users` is now reported as the peak vote count across all consensus
+        # crops — a lower-bound proxy for unique contributors, since the curated
+        # artefact no longer carries per-install attribution.
+        n_users_proxy = max(vote_counts.values(), default=0)
         print('\nUploading models to HF...')
-        ok = _upload_model(models_dir, len(label_counts), val_acc, n_samples, n_users,
+        ok = _upload_model(models_dir, len(label_counts), val_acc, n_samples, n_users_proxy,
                            sc_val_acc=sc_val_acc, sc_n_samples=sc_n_samples)
         if ok:
             print(f'\nDone — models published to {HF_REPO_ID}/models/')
@@ -1440,17 +1238,20 @@ Environment (.env or env vars in CI):
             print('\nERROR — upload failed.', file=sys.stderr)
             sys.exit(1)
 
-        # 5. Community anchors (P11) — aggregate and upload independently of training
-        print('\nAggregating community anchors (P11)...')
-        anchor_entries = build_community_anchors(folders, min_contributors=2)
+        # 5. Community anchors (P11) — read consensus from data/anchors/ (written by
+        # democratic_merge_anchors.py) and re-publish to the knowledge repo as
+        # community_anchors.json. No staging traversal here anymore.
+        print('\nReading community anchors from data/anchors/...')
+        anchor_entries = read_community_anchors()
         if anchor_entries:
             upload_community_anchors(anchor_entries, models_dir)
         else:
             print('No community anchors to upload yet.')
 
-        # 6. Ship Type / Tier OCR corrections — build and upload independently
-        print('\nBuilding ship type OCR correction map...')
-        collect_text_corrections(folders, models_dir)
+        # 6. Ship Type / Tier OCR corrections — read curated consensus from
+        # data/text_corrections.jsonl and re-publish to the knowledge repo.
+        print('\nPublishing ship type OCR correction map from data/...')
+        publish_text_corrections(models_dir)
 
 
 if __name__ == '__main__':
