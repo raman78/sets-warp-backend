@@ -242,6 +242,7 @@ def _merge(
             slot   = slot_c.most_common(1)[0][0] if slot_c else ''
             losers_dict = {n: v for n, v in votes.most_common()[1:4] if n != winner}
             entry: dict = {
+                'schema_version': 2,
                 'crop_sha256': sha,
                 'name':        winner,
                 'slot':        slot,

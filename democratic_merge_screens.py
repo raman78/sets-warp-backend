@@ -288,6 +288,7 @@ def _merge_screens(
                 action = 'NEW'
             losers = {t: v for t, v in c.most_common()[1:4] if t != winner}
             rec: dict = {
+                'schema_version': 2,
                 'sha':        sha,
                 'type':       winner,
                 'votes':      count,
@@ -346,6 +347,7 @@ def _merge_text(
                 action = 'NEW'
             losers = {n: v for n, v in c.most_common()[1:4] if n != winner}
             rec: dict = {
+                'schema_version': 2,
                 'ml_name':    ml,
                 'name':       winner,
                 'votes':      count,

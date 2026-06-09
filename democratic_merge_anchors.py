@@ -291,6 +291,7 @@ def _merge(
             if body is None:
                 action = 'SKIP'
             else:
+                body['schema_version'] = 2
                 body['build_type']    = key[0]
                 body['aspect_bucket'] = key[1]
                 body['updated_at']    = datetime.now(UTC).isoformat(timespec='seconds')\

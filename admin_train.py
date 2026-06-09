@@ -357,6 +357,7 @@ def upload_community_anchors(entries: list[dict], models_dir: Path) -> bool:
     import io
 
     payload = {
+        'schema_version': 2,
         'generated_at':  datetime.now(timezone.utc).isoformat() + 'Z',
         'n_contributors': max((e['n_contributors'] for e in entries), default=0),
         'entries':        entries,

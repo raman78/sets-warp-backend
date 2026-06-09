@@ -266,6 +266,7 @@ def _hf_save_state(
         import io as _io
         api = HfApi(token=HF_TOKEN)
         payload_obj = {
+            'schema_version':           2,
             'knowledge':                knowledge,
             'updated_at':               datetime.now(UTC).isoformat() + 'Z',
             'entries':                  len(knowledge),
