@@ -441,6 +441,10 @@ def main() -> int:
     print(f'  - SKIP:      {skip_count}  (below threshold)')
     print(f'  Total groups after merge: {len(merged)}')
 
+    # Uniform drain monitor (post-audit TODO #5).
+    print(f'DRAIN: domain=anchors promoted={len(promoted)} '
+          f'new={new_count} update={update_count} skip={skip_count}')
+
     if not args.apply:
         print('\nDRY-RUN — use --apply to commit.')
         return 0

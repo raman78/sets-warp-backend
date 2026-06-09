@@ -512,6 +512,14 @@ Environment variables (.env):
     print(f'  ✗ Skipped (not enough votes): {skip_count}')
     print(f'  Total after merge: {len(merged)} entries')
 
+    # Uniform drain monitor (post-audit TODO #5). The contributions drain set
+    # is built at apply-time below; here we report the upper bound — the
+    # promoted phash count is a per-cycle proxy for drain pressure.
+    promoted_for_log = sum(1 for r in report
+                           if r['action'] in ('NEW', 'UPDATE', 'unchanged'))
+    print(f'DRAIN: domain=contributions promoted={promoted_for_log} '
+          f'new={new_count} update={update_count} skip={skip_count}')
+
     # 5. Local export
     if args.export:
         Path(args.export).write_text(

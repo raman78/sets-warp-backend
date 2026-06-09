@@ -480,6 +480,12 @@ def main() -> int:
             encoding='utf-8')
         print(f'Local export → {args.export}')
 
+    # Uniform drain monitor (post-audit TODO #5). Promoted shas equal the
+    # staging crops that will be deleted next (dry-run reports the would-be
+    # count; --apply reports what was actually committed).
+    print(f'DRAIN: domain=crops promoted={len(promoted_shas)} '
+          f'new={new_count} update={update_count} skip={skip_count}')
+
     if not args.apply:
         print('\nDRY-RUN — use --apply to commit.')
         return 0

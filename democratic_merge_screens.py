@@ -556,6 +556,14 @@ def main() -> int:
     print(f'  Totals after merge — screens: {len(screens_merged)}, '
           f'text: {len(text_merged)}')
 
+    # Uniform drain monitor (post-audit TODO #5).
+    # Screens domain promotes by sha (PNG drain). Text domain has no PNG drain
+    # — it shares annotations.jsonl with crops, so promoted=0 there.
+    print(f'DRAIN: domain=screens promoted={len(screens_promoted)} '
+          f'new={sc_new} update={sc_upd} skip={sc_skip}')
+    print(f'DRAIN: domain=text promoted=0 '
+          f'new={tx_new} update={tx_upd} skip={tx_skip} poison={tx_poison}')
+
     if not args.apply:
         print('\nDRY-RUN — use --apply to commit.')
         return 0

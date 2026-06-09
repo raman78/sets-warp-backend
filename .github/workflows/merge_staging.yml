@@ -74,7 +74,7 @@ jobs:
           WARP_NO_VENV: '1'
         run: |
           MIN_VOTES="${{ github.event.inputs.min_votes || '2' }}"
-          python democratic_merge_crops.py --apply --min "$MIN_VOTES"
+          python democratic_merge_crops.py --apply --min "$MIN_VOTES" | tee /tmp/merge_crops.log
 
       - name: Merge anchors (staging/<iid>/anchors_grid_*.json → data/anchors/)
         if: ${{ always() }}
@@ -82,7 +82,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           MIN_VOTES="${{ github.event.inputs.min_votes || '2' }}"
-          python democratic_merge_anchors.py --apply --min "$MIN_VOTES"
+          python democratic_merge_anchors.py --apply --min "$MIN_VOTES" | tee /tmp/merge_anchors.log
 
       - name: Merge screens (staging/<iid>/screen_types + text → data/screen_types + text_corrections)
         if: ${{ always() }}
@@ -90,7 +90,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           MIN_VOTES="${{ github.event.inputs.min_votes || '2' }}"
-          python democratic_merge_screens.py --apply --min "$MIN_VOTES"
+          python democratic_merge_screens.py --apply --min "$MIN_VOTES" | tee /tmp/merge_screens.log
 
       - name: Merge knowledge (contributions/*.json → knowledge.json on warp-knowledge)
         if: ${{ always() }}
@@ -99,4 +99,15 @@ jobs:
           HF_REPO_ID: ${{ secrets.HF_REPO_ID || 'sets-sto/warp-knowledge' }}
         run: |
           MIN_VOTES="${{ github.event.inputs.min_votes || '2' }}"
-          python admin_merge.py --apply --min "$MIN_VOTES"
+          python admin_merge.py --apply --min "$MIN_VOTES" | tee /tmp/merge_knowledge.log
+
+      - name: Drain summary (post-audit TODO #5)
+        if: ${{ always() }}
+        run: |
+          {
+            echo '## Democratic-merge DRAIN summary'
+            echo
+            echo '```'
+            grep -h '^DRAIN: ' /tmp/merge_*.log 2>/dev/null || echo 'no DRAIN lines found'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
