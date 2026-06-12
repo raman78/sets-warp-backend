@@ -64,6 +64,7 @@ LR            = 3e-4
 PATIENCE      = 5
 BATCHES_PER_EPOCH_MIN = 60  # ensures small datasets still get enough updates
 MIN_SAMPLES   = 5
+N_FEATURE_AUGS = 5   # augmented backbone-feature passes for training crops
 
 
 # ── ArcFace head ─────────────────────────────────────────────────────────────
@@ -128,6 +129,61 @@ class PKBatchSampler:
 
     def __len__(self):
         return self.num_batches
+
+
+# ── Pre-computed feature helpers ─────────────────────────────────────────────
+
+class _FeatureDataset:
+    """Wraps pre-computed (feature, label) tensors for use with DataLoader."""
+    def __init__(self, features, labels):
+        self.features, self.labels = features, labels
+    def __len__(self): return len(self.features)
+    def __getitem__(self, i): return self.features[i], self.labels[i]
+
+
+def _extract_features(backbone, crops_list, labels_list, transform, device,
+                      n_passes=1, batch_size=64):
+    """Run crops through frozen backbone.  Multiple passes with a random-aug
+    transform produce diverse feature vectors for training."""
+    import cv2
+    import torch
+
+    class _ImgDS(torch.utils.data.Dataset):
+        def __init__(self, c, l, tf):
+            self.c, self.l, self.tf = c, l, tf
+        def __len__(self): return len(self.c)
+        def __getitem__(self, i):
+            return self.tf(cv2.cvtColor(self.c[i], cv2.COLOR_BGR2RGB)), self.l[i]
+
+    backbone.eval()
+    feats, lbls = [], []
+    for p in range(n_passes):
+        dl = torch.utils.data.DataLoader(
+            _ImgDS(crops_list, labels_list, transform),
+            batch_size=batch_size, shuffle=False, num_workers=0)
+        with torch.no_grad():
+            for xb, yb in dl:
+                feats.append(backbone(xb.to(device)).cpu())
+                lbls.append(yb)
+        if n_passes > 1:
+            print(f'    pass {p+1}/{n_passes}')
+    return torch.cat(feats), torch.cat(lbls)
+
+
+def _embed_features(proj, features, device, batch_size=512):
+    """Run pre-computed backbone features through the projection head.
+    Returns L2-normalised embeddings as a numpy float32 array."""
+    import numpy as np
+    import torch
+    import torch.nn.functional as F
+
+    proj.eval()
+    embs = []
+    with torch.no_grad():
+        for i in range(0, len(features), batch_size):
+            batch = features[i:i + batch_size].to(device)
+            embs.append(F.normalize(proj(batch), dim=1).cpu().numpy())
+    return np.concatenate(embs, axis=0).astype('float32')
 
 
 # ── Embedding gallery ────────────────────────────────────────────────────────
@@ -280,9 +336,12 @@ def _fit_metric(crops: list, labels: list[str],
                 models_dir: Path,
                 prev_model_pt: Path | None,
                 deadline: float | None) -> tuple[float, int]:
-    """Core training loop — independent of where crops came from.
-    Called by train_metric() (HF download) and the local-crops CLI mode."""
-    import cv2
+    """Core training loop — pre-computes backbone features for CPU efficiency.
+    On CPU, running EfficientNet-B0 forward+backward each epoch is too slow for
+    CI timeouts.  Instead: extract backbone features once (with N augmented
+    passes), then train only the lightweight projection + ArcFace head on
+    cached features.  Backbone weights are preserved in the saved model so
+    inference still runs the full pipeline (image → backbone → proj → L2)."""
     import numpy as np
     import torch
     import torch.nn.functional as F
@@ -301,7 +360,7 @@ def _fit_metric(crops: list, labels: list[str],
     y             = [label_to_idx[l] for l in labels]
     print(f'{n_classes} classes')
 
-    # ── Dataset ──────────────────────────────────────────────────────────────
+    # ── Transforms ───────────────────────────────────────────────────────────
     transform_train = T.Compose([
         T.ToPILImage(),
         T.RandomResizedCrop(MODEL_IMG_SIZE, scale=(0.8, 1.0)),
@@ -318,14 +377,7 @@ def _fit_metric(crops: list, labels: list[str],
         T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
 
-    class CropDataset(torch.utils.data.Dataset):
-        def __init__(self, crops, labels, tf):
-            self.crops, self.labels, self.tf = crops, labels, tf
-        def __len__(self):    return len(self.crops)
-        def __getitem__(self, i):
-            return self.tf(cv2.cvtColor(self.crops[i], cv2.COLOR_BGR2RGB)), self.labels[i]
-
-    # Stratified: 1 sample per class >=2 goes to val, rest to train
+    # ── Stratified train/val split ───────────────────────────────────────────
     by_cls: dict[int, list[int]] = defaultdict(list)
     for i, lbl in enumerate(y):
         by_cls[lbl].append(i)
@@ -340,39 +392,78 @@ def _fit_metric(crops: list, labels: list[str],
             train_idx.extend(idxs)
     random.shuffle(train_idx)
 
+    train_crops  = [crops[i] for i in train_idx]
     train_labels = [y[i] for i in train_idx]
+    val_crops    = [crops[i] for i in val_idx]
     val_labels   = [y[i] for i in val_idx]
 
-    ds_train = CropDataset([crops[i] for i in train_idx], train_labels, transform_train)
-    ds_train_eval = CropDataset([crops[i] for i in train_idx], train_labels, transform_val)
-    ds_val   = CropDataset([crops[i] for i in val_idx],   val_labels,   transform_val)
-
-    batches_per_epoch = max(BATCHES_PER_EPOCH_MIN, len(ds_train) // BATCH_SIZE)
-    pk_sampler = PKBatchSampler(train_labels, P=PK_P, K=PK_K, num_batches=batches_per_epoch)
-    dl_train = torch.utils.data.DataLoader(ds_train, batch_sampler=pk_sampler, num_workers=0)
-    dl_val   = torch.utils.data.DataLoader(ds_val, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
-
-    # ── Model + ArcFace head ─────────────────────────────────────────────────
+    # ── Model ────────────────────────────────────────────────────────────────
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = _build_embedder(prev_model_pt).to(device)
+
+    # ── Pre-compute backbone features ────────────────────────────────────────
+    # The EfficientNet-B0 forward pass dominates wall-time on CPU.  Extracting
+    # features once (with N_FEATURE_AUGS augmented passes for diversity) and
+    # then training only proj + ArcFace head on cached 1280-d vectors cuts
+    # total training from >2 h to ~20-30 min.
+    n_aug = N_FEATURE_AUGS
+
     print(f'\n── icon_embedder (EfficientNet-B0 + ArcFace) {"─" * 28}')
     print(f'  Dataset : {n} crops, {n_classes} classes ({len(train_idx)} train, {len(val_idx)} val)')
     print(f'  Embed   : {EMBED_DIM}-d, margin={ARC_MARGIN}, scale={ARC_SCALE}')
-    print(f'  Sampler : P={PK_P} × K={PK_K} → batch={BATCH_SIZE}, {batches_per_epoch} batches/epoch')
     print(f'  Device  : {device}')
+    print(f'  Strategy: pre-compute backbone features ({n_aug} aug passes)')
     print(f'{"─" * 64}')
 
-    model = _build_embedder(prev_model_pt).to(device)
-    head  = _build_arcface_head(EMBED_DIM, n_classes).to(device)
+    print(f'  Extracting backbone features...')
+    t0 = time.monotonic()
 
+    train_aug_feats, train_aug_labels = _extract_features(
+        model.backbone, train_crops, train_labels,
+        transform_train, device, n_passes=n_aug)
+
+    train_eval_feats, train_eval_labels = _extract_features(
+        model.backbone, train_crops, train_labels,
+        transform_val, device, n_passes=1)
+
+    val_feats, val_feat_labels = _extract_features(
+        model.backbone, val_crops, val_labels,
+        transform_val, device, n_passes=1)
+
+    all_feats, all_feat_labels = _extract_features(
+        model.backbone, crops, y,
+        transform_val, device, n_passes=1)
+
+    dt = time.monotonic() - t0
+    print(f'  Features extracted in {dt:.0f}s: '
+          f'{len(train_aug_feats)} train (x{n_aug} aug), '
+          f'{len(val_feats)} val')
+
+    # Free backbone from compute device — only proj + head needed now
+    model.backbone.cpu()
+
+    # ── PK sampler on cached features ────────────────────────────────────────
+    train_feat_ds = _FeatureDataset(train_aug_feats, train_aug_labels)
+    batches_per_epoch = max(BATCHES_PER_EPOCH_MIN, len(train_feat_ds) // BATCH_SIZE)
+    pk_sampler = PKBatchSampler(
+        train_aug_labels.tolist(), P=PK_P, K=PK_K,
+        num_batches=batches_per_epoch)
+    dl_train = torch.utils.data.DataLoader(
+        train_feat_ds, batch_sampler=pk_sampler, num_workers=0)
+
+    print(f'  Sampler : P={PK_P} x K={PK_K} -> batch={BATCH_SIZE}, '
+          f'{batches_per_epoch} batches/epoch')
+
+    # ── ArcFace head + optimiser (proj + head only) ──────────────────────────
+    head = _build_arcface_head(EMBED_DIM, n_classes).to(device)
     optimizer = torch.optim.AdamW(
-        list(model.parameters()) + list(head.parameters()), lr=LR
-    )
+        list(model.proj.parameters()) + list(head.parameters()), lr=LR)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=MAX_EPOCHS)
     criterion = torch.nn.CrossEntropyLoss().to(device)
 
-    # ── Training loop ────────────────────────────────────────────────────────
-    best_recall   = 0.0
-    best_state    = None
+    # ── Training loop (proj + head only — seconds per epoch) ─────────────────
+    best_recall    = 0.0
+    best_state     = None
     patience_count = 0
 
     for epoch in range(MAX_EPOCHS):
@@ -380,13 +471,13 @@ def _fit_metric(crops: list, labels: list[str],
             print(f'  Time budget exceeded, stopping at epoch {epoch+1}.')
             break
 
-        model.train(); head.train()
+        model.proj.train(); head.train()
         loss_sum = 0.0
         n_batch = 0
-        for xb, yb in dl_train:
-            xb, yb = xb.to(device), yb.to(device)
+        for feat_batch, yb in dl_train:
+            feat_batch, yb = feat_batch.to(device), yb.to(device)
             optimizer.zero_grad()
-            emb = model(xb)
+            emb = F.normalize(model.proj(feat_batch), dim=1)
             logits = head(emb, yb)
             loss = criterion(logits, yb)
             loss.backward()
@@ -396,18 +487,21 @@ def _fit_metric(crops: list, labels: list[str],
         scheduler.step()
         avg_loss = loss_sum / max(1, n_batch)
 
-        # Validation: embed train + val with no aug, k-NN recall@1
-        g_emb, g_lbl = _build_gallery(model, head, ds_train_eval, device)
-        q_emb, q_lbl = _build_gallery(model, head, ds_val, device)
-        val_recall = _recall_at_1(g_emb, g_lbl, q_emb, q_lbl)
+        # Validation: k-NN recall@1 on pre-computed features
+        model.proj.eval()
+        g_emb = _embed_features(model.proj, train_eval_feats, device)
+        q_emb = _embed_features(model.proj, val_feats, device)
+        val_recall = _recall_at_1(
+            g_emb, train_eval_labels.numpy(),
+            q_emb, val_feat_labels.numpy())
         print(f'  Epoch {epoch+1:2d}/{MAX_EPOCHS}  loss={avg_loss:.3f}  '
               f'val_recall@1={val_recall:.1%}  best={best_recall:.1%}')
 
         if val_recall > best_recall:
             best_recall = val_recall
             best_state = {
-                'model': {k: v.cpu().clone() for k, v in model.state_dict().items()},
-                'head':  {k: v.cpu().clone() for k, v in head.state_dict().items()},
+                'proj': {k: v.cpu().clone() for k, v in model.proj.state_dict().items()},
+                'head': {k: v.cpu().clone() for k, v in head.state_dict().items()},
             }
             patience_count = 0
         else:
@@ -417,16 +511,16 @@ def _fit_metric(crops: list, labels: list[str],
                 break
 
     if best_state:
-        model.load_state_dict(best_state['model'])
+        model.proj.load_state_dict(best_state['proj'])
         head.load_state_dict(best_state['head'])
 
     # ── Save ─────────────────────────────────────────────────────────────────
     models_dir.mkdir(parents=True, exist_ok=True)
     model.eval().cpu()
 
-    # Final gallery — embed ALL training samples (used for k-NN at inference)
-    ds_all = CropDataset(crops, y, transform_val)
-    full_emb, full_lbl = _build_gallery(model, head, ds_all, torch.device('cpu'))
+    # Final gallery from pre-computed features + trained projection
+    full_emb = _embed_features(model.proj, all_feats, torch.device('cpu'))
+    full_lbl = all_feat_labels.numpy().astype('int32')
 
     torch.save(model.state_dict(), str(models_dir / 'icon_embedder.pt'))
     np.savez(
@@ -434,8 +528,6 @@ def _fit_metric(crops: list, labels: list[str],
         embeddings=full_emb,
         labels=full_lbl,
     )
-    # Embedder-specific label map — kept distinct from softmax's label_map.json
-    # so the two classifiers coexist with disjoint class spaces.
     with open(models_dir / 'embedder_label_map.json', 'w', encoding='utf-8') as f:
         json.dump(idx_to_label, f, ensure_ascii=False, indent=2)
     with open(models_dir / 'icon_embedder_meta.json', 'w', encoding='utf-8') as f:
@@ -449,6 +541,7 @@ def _fit_metric(crops: list, labels: list[str],
             'arc_scale':    ARC_SCALE,
             'pk_p':         PK_P,
             'pk_k':         PK_K,
+            'n_feature_augs': n_aug,
             'trained_at':   datetime.now(UTC).isoformat() + 'Z',
         }, f, indent=2)
 
@@ -562,6 +655,8 @@ def main():
                              'Filenames must follow <prefix>__<label>__<hash>.png.')
     parser.add_argument('--upload', action='store_true',
                         help='Upload trained embedder to HF after training')
+    parser.add_argument('--deadline-minutes', type=int, default=None, metavar='M',
+                        help='Stop training after M minutes (leaves time for upload in CI)')
     args = parser.parse_args()
 
     # ── Local crops mode (fast iteration) ────────────────────────────────────
@@ -600,11 +695,15 @@ def main():
         out_dir / 'icon_classifier.pt'
     )
 
+    _deadline = (time.monotonic() + args.deadline_minutes * 60
+                 if args.deadline_minutes else None)
+
     with tempfile.TemporaryDirectory(prefix='warp_metric_') as td:
         train_metric(
             winner_labels,
             models_dir=out_dir, tmpdir=Path(td),
             prev_model_pt=prev_pt if prev_pt.exists() else None,
+            deadline=_deadline,
         )
 
     if args.upload:

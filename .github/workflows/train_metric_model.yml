@@ -82,4 +82,5 @@ jobs:
             WARM_FLAG="--warm-start-from /tmp/warp_metric_out/icon_classifier.pt"
           fi
           python admin_train_metric.py --train --upload --min 1 \
+            --deadline-minutes 100 \
             --out /tmp/warp_metric_out $WARM_FLAG
