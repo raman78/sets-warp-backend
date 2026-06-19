@@ -74,10 +74,17 @@ DATA_CRP = 'data/crops'
 def _is_poison_name(name: str) -> bool:
     """
     Names that must NEVER enter data/annotations.jsonl:
-      - virtual classes (__empty__, __inactive__, __boff_*) — would hard-
-        override real icons to 'empty/inactive' with conf=1.0 at inference.
+      - internal test markers (__boff_*, Test Item Name)
       - leftover dev-test entries.
+
+    __empty__ and __inactive__ are ALLOWED — the ArcFace embedder needs
+    them as gallery classes so inactive/empty slots match to their own
+    class instead of nearest-neighbour-snapping to a real ability.
+    The pHash override path in icon_matcher already suppresses virtual
+    names independently (name.startswith('__') → suppress=True).
     """
+    if name in ('__empty__', '__inactive__'):
+        return False
     return name.startswith('__') or name == 'Test Item Name'
 
 
