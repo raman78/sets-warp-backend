@@ -21,23 +21,22 @@ Admin/training scripts (`admin_*.py`, `democratic_merge_crops.py`,
 the Space** — they aren't needed at runtime and shipping them would
 just enlarge the image and the attack surface.
 
-## One-shot manual deploy
+## Automatic deploy (default)
+
+A push to `main` that touches a runtime file (`main.py`, `requirements.txt`,
+`space/Dockerfile`, `space/README.md`, `deploy_space.py`) triggers
+`.github/workflows/deploy_space.yml`, which runs `deploy_space.py` to upload
+all four files to the Space in **one commit** → one rebuild. Nothing to do by
+hand — just push. Uses the existing `HF_TOKEN` Actions secret (needs Space
+write scope; if the deploy step 403s, widen that token's scope).
+
+## Manual deploy (fallback)
+
+Run the same script locally with a write token:
 
 ```sh
-# 1. Clone the Space repo (HF prompts for username + token if needed).
-git clone https://huggingface.co/spaces/sets-sto/warp-backend /tmp/warp-backend-space
-cd /tmp/warp-backend-space
-
-# 2. Stage the four runtime files.
-cp ~/PycharmProjects/sets-warp-backend/space/Dockerfile .
-cp ~/PycharmProjects/sets-warp-backend/space/README.md .
-cp ~/PycharmProjects/sets-warp-backend/main.py .
-cp ~/PycharmProjects/sets-warp-backend/requirements.txt .
-
-# 3. Commit & push. Space rebuilds automatically.
-git add Dockerfile README.md main.py requirements.txt
-git commit -m "Deploy: initial Phase 0 image"
-git push
+HF_TOKEN=hf_xxx python deploy_space.py            # upload + rebuild
+HF_TOKEN=hf_xxx python deploy_space.py --dry-run  # show the file plan only
 ```
 
 After the build completes (watch the "Logs" tab in the Space UI), check:

@@ -9,11 +9,11 @@ Handles democratic voting on community data and automated model training (Icon C
 - PyTorch & Torchvision (Model training)
 - OpenCV (Image processing)
 - Hugging Face Hub (Storage & Model hosting)
-- Render (Production deployment)
+- Hugging Face Space (production deployment; Docker SDK. `render.yaml` is a legacy fallback, not the live host)
 
 ## Strict Rules
 1. **Language**: All code comments, logs, and commit messages MUST be in English.
-2. **Environment**: Code must be tested locally and compatible with Render (production).
+2. **Environment**: Code must be tested locally and compatible with the HF Space Docker runtime (production). Deploy is automatic: a push to `main` touching a runtime file runs `deploy_space.py` via `.github/workflows/deploy_space.yml`.
 3. **Communication**: Verify bidirectional communication (client-server and server-HF).
 4. **Data Integrity**: Always verify that data/crops are correctly uploaded to the HF Dataset.
 5. **Model Training**: Verify that training starts correctly and models are valid before upload.
@@ -35,7 +35,7 @@ Handles democratic voting on community data and automated model training (Icon C
 ## Development Best Practices
 - **Type Hints**: Use Python type hints everywhere.
 - **Logging**: Use `log = logging.getLogger(__name__)`.
-- **Resource Management**: Be mindful of RAM limits on Render (adjust BATCH_SIZE if needed).
+- **Resource Management**: Be mindful of RAM limits on the HF Space (`cpu-basic` tier; adjust BATCH_SIZE if needed).
 - **Style**: Match the existing script style (flat structure, clear section separators).
 
 ## HF Configuration

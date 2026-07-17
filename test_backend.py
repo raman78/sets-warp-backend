@@ -15,8 +15,8 @@ import urllib.request
 import urllib.error
 import time
 
-BACKEND_URL = 'https://sets-warp-backend.onrender.com'
-GLOBAL_TIMEOUT = 60  # Increased for Render cold starts
+BACKEND_URL = 'https://sets-sto-warp-backend.hf.space'  # production HF Space
+GLOBAL_TIMEOUT = 60  # Increased for HF Space cold starts (sleeps after ~48h idle)
 
 
 def test_health():

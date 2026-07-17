@@ -18,7 +18,7 @@ chain together.
 
 ```
 ┌───────────────────────────────────────────────────────────────────┐
-│  FastAPI service (main.py)            — Render web service       │
+│  FastAPI service (main.py)            — HF Space (Docker)        │
 │    • receives client uploads (bulk + legacy single-shot)         │
 │    • serves /knowledge, /model/version, /config/labels           │
 │    • holds the HF write token (env var, never on clients)        │
@@ -73,9 +73,11 @@ chain together.
 
 ## 2. FastAPI service (`main.py`)
 
-Deployed on Render as a single-worker uvicorn web service. Holds the
-HF write token as a server-side environment variable; no client can
-reach HF directly for writes.
+Deployed as a HuggingFace Space (Docker, `sets-sto/warp-backend`,
+`sets-sto-warp-backend.hf.space`), auto-updated by `deploy_space.py` /
+the Deploy Space workflow on every push to `main`. Holds the HF write
+token as a server-side Space secret; no client can reach HF directly
+for writes.
 
 ### Endpoints
 
@@ -305,14 +307,22 @@ bugs; the manual gate is deliberate.
 
 ---
 
-## 6. Render deployment
+## 6. Deployment (HF Space)
+
+Production runs as a HuggingFace Space (`sets-sto/warp-backend`). A push
+to `main` that touches a runtime file triggers `.github/workflows/
+deploy_space.yml`, which runs `deploy_space.py` to upload the four runtime
+files (`main.py`, `requirements.txt`, `space/Dockerfile`, `space/README.md`)
+to the Space in one commit → one rebuild. `render.yaml` is a legacy fallback
+target, not the live host.
 
 | Aspect | Value |
 |---|---|
-| Python | 3.12 (from `render.yaml`) |
+| Host | HF Space, Docker SDK, `cpu-basic` (sleeps after ~48h idle) |
+| Python | 3.12 (from `space/Dockerfile`) |
 | Start | `uvicorn main:app --host 0.0.0.0 --port $PORT` |
 | Health check | `/health` |
-| Workers | 1 (Render free tier) |
+| Deploy | auto via `deploy_space.py` on push to `main` (secret `HF_TOKEN`) |
 | Pinning | All `requirements.txt` entries pinned with `==` |
 
 ### Required env vars

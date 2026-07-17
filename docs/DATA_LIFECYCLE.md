@@ -37,7 +37,7 @@ trainers, the audit) see [`technical_overview.md`](technical_overview.md).
           │  HTTPS, no HF token on client
           ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│  BACKEND (FastAPI on Render)                                     │
+│  BACKEND (FastAPI on HF Space)                                   │
 │                                                                  │
 │  /contribute/bulk-crops    /upload/screen-types  /upload/anchors │
 │         │                                                        │

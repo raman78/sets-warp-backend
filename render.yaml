@@ -1,3 +1,7 @@
+# LEGACY FALLBACK — not the live host. Production runs as a HuggingFace
+# Space (sets-sto/warp-backend, sets-sto-warp-backend.hf.space), deployed by
+# deploy_space.py / .github/workflows/deploy_space.yml. This blueprint is kept
+# only as a Render fallback; the shipped sto-warp client points at the Space.
 services:
   - type: web
     name: sets-warp-backend

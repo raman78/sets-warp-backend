@@ -3,6 +3,22 @@
 ## [Unreleased]
 
 ### Added
+- **Automatic Space deploy.** Added `deploy_space.py` (uploads the four
+  runtime files — `main.py`, `requirements.txt`, `space/Dockerfile`,
+  `space/README.md` — to `spaces/sets-sto/warp-backend` in a single
+  `HfApi` commit) and `.github/workflows/deploy_space.yml`, which runs it
+  on every push to `main` touching a runtime file. A `git push` to GitHub
+  now redeploys the live Space automatically; reuses the existing
+  `HF_TOKEN` Actions secret (Space write scope). Replaces the manual
+  clone/copy/push in `space/README_deploy.md`.
+
+### Changed
+- **Docs now name HF Space (not Render) as production.** `technical_overview.md`
+  (§1/§2/§6), `DATA_LIFECYCLE.md`, `CLAUDE.md`, `space/README_deploy.md`, and
+  `test_backend.py`'s `BACKEND_URL` updated to reflect the live host
+  (`sets-sto-warp-backend.hf.space`). `render.yaml` marked legacy-fallback.
+
+### Added
 - **Documentation refresh.** Rewrote `docs/technical_overview.md` to
   cover the four democratic mergers (`democratic_merge_crops.py`,
   `democratic_merge_anchors.py`, `democratic_merge_screens.py`,
