@@ -12,3 +12,7 @@ env/
 dist/
 build/
 
+
+# admin_reject_crops.py local working files
+virtual_reject_montage.png
+virtual_reject_decisions.tsv

@@ -12,6 +12,14 @@ dependencies = [
     "numpy>=1.26.0",
 ]
 
+[project.optional-dependencies]
+# Maintainer-only console (admin_console.py + admin_reject_crops.py). NOT
+# installed on the HF Space Docker runtime — only for local maintainer use
+# with a write token. `sto-warp` supplies the cargo name list (RELABEL
+# validation) via warp.data.cargo; the tools also fall back to a sibling
+# sto-warp checkout when it isn't pip-installed.
+admin = ["PySide6>=6.6.0", "sto-warp"]
+
 [project.scripts]
 warp-backend-setup = "setup:main"
 warp-backend       = "main:app"

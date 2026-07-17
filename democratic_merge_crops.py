@@ -69,6 +69,10 @@ RTYPE = 'dataset'
 
 DATA_ANN = 'data/annotations.jsonl'
 DATA_CRP = 'data/crops'
+# Maintainer review ledger written by admin_reject_crops.py. Shas decided
+# REJECT there must never be re-promoted, even if a user re-uploads the same
+# colourful crop that was mislabeled __empty__/__inactive__.
+LEDGER   = 'data/reviewed_virtual.jsonl'
 
 
 def _is_poison_name(name: str) -> bool:
@@ -86,6 +90,28 @@ def _is_poison_name(name: str) -> bool:
     if name in ('__empty__', '__inactive__'):
         return False
     return name.startswith('__') or name == 'Test Item Name'
+
+
+def _load_rejected_shas(snap_dir) -> set[str]:
+    """Return the set of crop_sha256 the maintainer marked REJECT in the
+    review ledger (data/reviewed_virtual.jsonl). These are permanently barred
+    from data/ — re-uploads must not resurrect them. Missing ledger = empty."""
+    out: set[str] = set()
+    local = Path(snap_dir) / LEDGER
+    if not local.exists():
+        return out
+    with open(local, encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            if d.get('decision') == 'REJECT' and d.get('crop_sha256'):
+                out.add(d['crop_sha256'])
+    return out
 
 
 def _load_existing(snap_dir) -> dict[str, dict]:
@@ -115,6 +141,7 @@ def _load_existing(snap_dir) -> dict[str, dict]:
 
 def _collect_votes(
     snap_dir, since: str | None, repo_files: set[str],
+    rejected: set[str] | None = None,
 ) -> tuple[
     dict[str, Counter],
     dict[str, Counter],
@@ -137,6 +164,7 @@ def _collect_votes(
       - staging_records[install_id] → raw annotation dicts kept for the
         staging rewrite (drain trims entries whose sha was promoted)
     """
+    rejected = rejected or set()
     root = Path(snap_dir) / 'staging'
     if not root.exists():
         print(f'WARNING: no staging/ folder at {root}')
@@ -184,6 +212,9 @@ def _collect_votes(
                             continue
                     if _is_poison_name(name):
                         continue
+                    if sha in rejected:
+                        # Maintainer-rejected crop re-uploaded: never re-promote.
+                        continue
                     # Dedup duplicate uploads from one install: one vote each.
                     key = (sha, name, slot)
                     if key in seen_in_install:
@@ -210,6 +241,7 @@ def _merge(
     existing:   dict[str, dict],
     min_votes:  int,
     verbose:    bool,
+    rejected:   set[str] | None = None,
 ) -> tuple[dict[str, dict], list[dict], set[str]]:
     """Majority vote. Returns (merged, report_rows, promoted_shas).
 
@@ -218,12 +250,15 @@ def _merge(
     even when the consensus was already reflected in data/ — those votes
     have done their job and should not be re-tallied next run.
     """
-    # Drop legacy poison entries from existing (one-shot self-heal).
+    # Drop legacy poison entries + maintainer-rejected shas from existing
+    # (one-shot self-heal — keeps data/ clean even if one slipped in).
+    rejected = rejected or set()
     merged = {sha: rec for sha, rec in existing.items()
-              if not _is_poison_name((rec.get('name') or ''))}
+              if not _is_poison_name((rec.get('name') or ''))
+              and sha not in rejected}
     dropped_poison = len(existing) - len(merged)
     if dropped_poison:
-        print(f'[clean] dropped {dropped_poison} legacy poison entries')
+        print(f'[clean] dropped {dropped_poison} legacy poison / rejected entries')
 
     report: list[dict] = []
     promoted_shas: set[str] = set()
@@ -454,9 +489,13 @@ def main() -> int:
     existing = _load_existing(snap_dir)
     print(f'Existing data/annotations.jsonl: {len(existing)} entries')
 
+    rejected = _load_rejected_shas(snap_dir)
+    if rejected:
+        print(f'Review ledger: {len(rejected)} rejected sha(s) barred from data/')
+
     (name_votes, slot_votes, crop_src, per_install,
      contributors_for_sha, staging_records) = _collect_votes(
-        snap_dir, since=args.since, repo_files=repo_files)
+        snap_dir, since=args.since, repo_files=repo_files, rejected=rejected)
     print(f'Contributors: {len(per_install)}   '
           f'unique sha hashes voted on: {len(name_votes)}')
 
@@ -466,7 +505,7 @@ def main() -> int:
 
     merged, report, promoted_shas = _merge(
         name_votes, slot_votes, existing,
-        min_votes=args.min, verbose=args.verbose)
+        min_votes=args.min, verbose=args.verbose, rejected=rejected)
 
     new_count    = sum(1 for r in report if r['action'] == 'NEW')
     update_count = sum(1 for r in report if r['action'] == 'UPDATE')
