@@ -1,0 +1,79 @@
+# .github/workflows/audit_virtual_poison.yml
+#
+# Virtual-Poison Audit — monthly mislabeled-crop detector
+# =======================================================
+# Runs admin_audit_virtual_poison.py (read-only) on the 1st of every month
+# and on-demand via workflow_dispatch. Counts colourful __empty__/__inactive__
+# crops in data/ that are NOT yet resolved in data/reviewed_virtual.jsonl —
+# i.e. real icons mislabeled as empty/inactive that the client logs as
+# `CommunitySeed: POISON skip`.
+#
+# Healthy steady state: unreviewed=0. The maintainer reviews new poison via
+# admin_reject_crops.py (or the admin console) — reject / relabel / KEEP. We
+# do NOT auto-fix: a mislabeled crop needs a human to decide the real item,
+# so the audit only surfaces the anomaly and emails the owner on breach.
+#
+# Runs an hour after the staging audit (05:00 vs 04:00) to spread HF load.
+
+name: Virtual-Poison Audit
+
+on:
+  schedule:
+    - cron: '0 5 1 * *'   # 1st of month, 05:00 UTC
+  workflow_dispatch:
+    inputs:
+      max:
+        description: 'Max unreviewed colourful virtual crops before BREACH (default: 0)'
+        required: false
+        default: '0'
+        type: string
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install --quiet 'huggingface_hub>=1.7.2' 'opencv-python-headless>=4.9.0' 'numpy>=1.26.0'
+
+      - name: Audit virtual-label poison in data/
+        id: audit
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          WARP_NO_VENV: '1'
+        run: |
+          MAX="${{ github.event.inputs.max || '0' }}"
+          python admin_audit_virtual_poison.py --max "$MAX" | tee /tmp/audit_poison.log
+
+      - name: Publish summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo '## Virtual-Poison Audit'
+            echo
+            echo '```'
+            grep -h '^AUDIT: ' /tmp/audit_poison.log 2>/dev/null || echo 'no AUDIT line found'
+            echo '```'
+            echo
+            if grep -q 'status=BREACH' /tmp/audit_poison.log 2>/dev/null; then
+              echo '### ⚠ Unreviewed poison found'
+              echo
+              echo 'Real icons are mislabeled `__empty__`/`__inactive__` in `data/`.'
+              echo 'Review them with `admin_reject_crops.py` (or the admin console):'
+              echo 'reject, relabel to the real item, or KEEP if genuinely empty.'
+            else
+              echo '### ✓ Clean'
+              echo
+              echo 'No unreviewed colourful virtual crops.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

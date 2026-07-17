@@ -68,6 +68,8 @@ chain together.
 | One-shot drain | Manual cleanup when audit breaches | `admin_drain_stale_staging.py` |
 | Knowledge scrubber | Removes confirmed-bad pHash entries | `admin_scrub_knowledge.py` |
 | Label scrubber | Removes confirmed-bad crop labels | `admin_clean_labels.py` |
+| Virtual-crop review | Reject/relabel colourful `__empty__` crops + GUI | `admin_reject_crops.py`, `admin_console.py` |
+| Virtual-poison audit | Read-only unreviewed-poison count, monthly cron | `admin_audit_virtual_poison.py` |
 
 ---
 
@@ -304,6 +306,18 @@ is reserved for the case where the audit flagged a breach, the cause
 has been understood and patched, and the leaked orphans need to be
 mopped up by hand. Scheduling it would silently paper over merger
 bugs; the manual gate is deliberate.
+
+### Virtual-poison audit (`admin_audit_virtual_poison.py`)
+
+`audit_virtual_poison.yml` (monthly cron, 1st 05:00 UTC) counts colourful
+`__empty__`/`__inactive__` crops in `data/` not yet resolved in the review
+ledger `data/reviewed_virtual.jsonl` — real icons mislabeled as empty slots,
+which the client logs as `CommunitySeed: POISON skip`. Breach exits 1 and
+emails the owner. Cleanup is the manual review in `admin_reject_crops.py`
+(`--scan` → montage + decisions TSV → `--apply`: reject / relabel / KEEP),
+also driveable from the `admin_console.py` GUI. RELABEL names are validated
+against sto-warp's `warp.data.cargo.canonical_names()`. Rejected shas are
+barred from re-promotion by the denylist read in `democratic_merge_crops.py`.
 
 ---
 

@@ -3,6 +3,28 @@
 ## [Unreleased]
 
 ### Added
+- **Virtual-crop review tooling.** `admin_reject_crops.py` reviews colourful
+  `__empty__`/`__inactive__` crops in `data/` (real icons the client logs as
+  `CommunitySeed: POISON skip`): `--scan` (read-only) shallow-clones the
+  dataset, flags virtual-label crops that trip the bright/rich heuristic
+  (0.15/0.15, in sync with the client's `_virtual_crop_looks_real`), and
+  writes a montage PNG + a decisions TSV; pixels are read from sto-warp's
+  local crop mirror when present (falls back to `hf_hub_download`). `--apply`
+  commits one atomic change — REJECT drops from `data/` + drains staging,
+  RELABEL rewrites the `name` (same sha), all decisions appended to a review
+  ledger `data/reviewed_virtual.jsonl`. RELABEL targets are validated against
+  sto-warp's live cargo (`warp.data.cargo.canonical_names()` — the source of
+  truth, no re-parsing), so a typo can never enter the dataset.
+- **Maintainer console.** `admin_console.py` — a PySide6 GUI (optional
+  `[admin]` extra, NOT installed on the Space Docker runtime) that shells out
+  to the review/merge/audit CLIs; RELABEL is a searchable cargo dropdown.
+- **Anti-resurrection denylist.** `democratic_merge_crops.py` now reads the
+  review ledger and skips `decision==REJECT` shas, so a re-uploaded rejected
+  crop can never be re-promoted.
+- **Virtual-poison audit.** `admin_audit_virtual_poison.py` + monthly
+  `audit_virtual_poison.yml` (1st of month, 05:00 UTC) count colourful virtual
+  crops not yet resolved in the ledger and exit 1 on breach — the automated
+  reminder to review new mislabels (mirrors `admin_audit_staging.py`).
 - **Automatic Space deploy.** Added `deploy_space.py` (uploads the four
   runtime files — `main.py`, `requirements.txt`, `space/Dockerfile`,
   `space/README.md` — to `spaces/sets-sto/warp-backend` in a single
