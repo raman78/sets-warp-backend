@@ -83,7 +83,7 @@ MAX_BULK_CROPS         = 50
 MAX_BULK_SCREEN_TYPES  = 20
 MAX_BULK_ANCHOR_GRIDS  = 20
 MAX_CROP_PNG_BYTES     = 150_000     # icon crop
-MAX_SCREEN_PNG_BYTES   = 2_500_000   # full screenshot
+MAX_SCREEN_PNG_BYTES   = 6_000_000   # full-resolution screenshot (raw bytes)
 MIN_CROP_PX            = 16
 MIN_TEXT_CROP_H        = 10
 MIN_TEXT_CROP_W        = 50
@@ -215,7 +215,10 @@ class BulkCropsRequest(BaseModel):
 
 
 class _ScreenTypeItem(BaseModel):
-    png_b64: str = Field(..., min_length=100, max_length=4_000_000)
+    # 8M b64 ≈ 6 MB raw (= MAX_SCREEN_PNG_BYTES × 4/3) — accepts full-resolution
+    # screenshots. Keep in sync with sync.py MAX_SCREEN_PNG_B64 and the byte
+    # cap enforced in upload_screen_types().
+    png_b64: str = Field(..., min_length=100, max_length=8_000_000)
 
 
 class ScreenTypesRequest(BaseModel):
