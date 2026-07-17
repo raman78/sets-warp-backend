@@ -1,0 +1,51 @@
+# .github/workflows/deploy_space.yml
+#
+# Auto-deploy the backend to its HuggingFace Space on every push to main
+# that changes a runtime file. Uploads main.py + requirements.txt +
+# space/{Dockerfile,README.md} to spaces/sets-sto/warp-backend as one
+# commit, which triggers exactly one Space rebuild.
+#
+# SETUP (one-time):
+#   The existing `HF_TOKEN` Actions secret is reused. It must have WRITE
+#   access to the Space repo (not just the datasets). A classic write
+#   token covers it; a fine-grained token needs the Space added to its
+#   scope. If the deploy step 403s, update HF_TOKEN's scope.
+#
+# GitHub Actions for PUBLIC repos = unlimited free minutes.
+
+name: Deploy Space
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - main.py
+      - requirements.txt
+      - space/Dockerfile
+      - space/README.md
+      - deploy_space.py
+      - .github/workflows/deploy_space.yml
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install --quiet 'huggingface_hub>=1.7.2'
+
+      - name: Push runtime files to HF Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python deploy_space.py
