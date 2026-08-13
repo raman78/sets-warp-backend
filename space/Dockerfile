@@ -18,6 +18,10 @@ RUN pip install --no-cache-dir --upgrade pip \
 # Runtime sources only — admin/training scripts stay out of the deployed
 # image to keep it small and reduce the attack surface.
 COPY --chown=user main.py ./
+# The ingestion whitelist. Uploading it to the Space repo is not enough: it has
+# to be copied into the image, or _load_labels_bundled() finds nothing and the
+# backend fails open with validation disabled (which is what /health reports).
+COPY --chown=user config/ ./config/
 
 # Must match app_port in README.md YAML so HF's edge routes to the right port.
 EXPOSE 7860
