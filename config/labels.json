@@ -69,6 +69,10 @@
       "Boff Tactical", "Boff Engineering", "Boff Science",
       "Boff Intelligence", "Boff Command", "Boff Pilot", "Boff Miracle Worker", "Boff Temporal",
       "Primary Specialization", "Secondary Specialization"
-    ]
+    ],
+    "SKILLS": [],
+    "SPACE_SKILLS": [],
+    "GROUND_SKILLS": [],
+    "DISCARD": []
   }
 }

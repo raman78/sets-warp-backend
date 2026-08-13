@@ -85,9 +85,9 @@ for writes.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/health` | Liveness check, returns `{"ok": true}` |
+| `GET` | `/health` | Liveness check. Also reports `validation`: `enforcing` or `DISABLED (empty whitelist)` — an empty whitelist switches every ingestion gate off, so it must be visible from outside |
 | `GET` | `/model/version` | Latest centrally-trained model metadata — softmax (`trained_at`) **and** ArcFace embedder (`embedder_trained_at`), versioned separately |
-| `GET` | `/config/labels` | Backend-side label map (e.g. screen types) |
+| `GET` | `/config/labels` | Backend-side label map (screen types + per-build-type slots). Source of truth: `config/labels.json`, shipped to the Space by `deploy_space.py` — if it is missing the backend runs with **no** ingestion validation |
 | `GET` | `/knowledge` | Merged pHash → item-name lookup table |
 | `POST` | `/contribute` | Legacy single-shot pHash contribution |
 | `POST` | `/contribute/bulk-crops` | Up to 50 confirmed icon crops per call |
@@ -132,6 +132,20 @@ the server cap is the abuse gate).
 aspect ratio bounded to plausible monitor ratios (~0.5 – 3.56). Item
 names truncated at `MAX_NAME_LEN = 120`. Anything that fails validation
 is rejected with HTTP 4xx — never silently written to HF.
+
+On top of the regexes, `config/labels.json` is the whitelist:
+`screen_types[]` gates `/upload/screen-types` and the `build_type` of
+every anchor grid, and `slots[<build_type>]` gates the slot names inside
+a grid. A **declared but empty** slot list means the screen has no icon
+slots at all (`DISCARD`, the skill trees), so any anchor grid claiming it
+is rejected; a **missing** entry leaves that build type ungated.
+
+The whole whitelist fails open — an empty `screen_types[]` disables every
+gate — so that a transient HF outage cannot black-hole uploads. That is
+also its failure mode: the file must actually reach the Space
+(`RUNTIME_FILES` in `deploy_space.py`), or the backend runs wide open and
+looks perfectly healthy while doing it. `GET /health` reports which of
+the two states it is in.
 
 ### Webhook trigger
 

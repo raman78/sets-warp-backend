@@ -57,6 +57,24 @@
   `HF_TOKEN` Actions secret (Space write scope). Replaces the manual
   clone/copy/push in `space/README_deploy.md`.
 
+### Fixed
+- **The ingestion whitelist was never live.** `config/labels.json` is not in
+  `deploy_space.RUNTIME_FILES`, so the Space never received it;
+  `_load_labels_bundled()` raised, `_get_labels()` returned
+  `{'screen_types': [], 'slots': {}}`, and every gate that reads
+  `if allowed_...:` switched itself off. Production served
+  `/config/labels → {"screen_types": [], "slots": {}}` and accepted any
+  screen_type, any anchor build_type and any slot names. The file now ships
+  (and the deploy workflow triggers on it), the failure logs at ERROR instead
+  of WARNING, and `GET /health` reports `validation: enforcing | DISABLED
+  (empty whitelist)` so the same rot cannot go unnoticed again. The fail-open
+  itself is kept: a transient HF outage must not black-hole uploads.
+- **Anchor grids for slotless screens are now rejected.** A declared-but-empty
+  `slots[<build_type>]` (DISCARD, SKILLS, SPACE_SKILLS, GROUND_SKILLS) means
+  the screen has no icon slots, so a grid claiming one is invalid by
+  definition; previously an empty list was indistinguishable from a missing
+  entry and disabled the check.
+
 ### Changed
 - **Docs now name HF Space (not Render) as production.** `technical_overview.md`
   (§1/§2/§6), `DATA_LIFECYCLE.md`, `CLAUDE.md`, `space/README_deploy.md`, and

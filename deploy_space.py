@@ -35,6 +35,12 @@ RUNTIME_FILES: dict[str, str] = {
     'space/README.md':    'README.md',
     'main.py':            'main.py',
     'requirements.txt':   'requirements.txt',
+    # Without this the Space has no whitelist at all: _load_labels_bundled()
+    # raises, _get_labels() hands back {'screen_types': [], 'slots': {}}, and
+    # every endpoint that gates on a non-empty whitelist stops gating. The
+    # fail-open is deliberate (a transient HF outage must not black-hole
+    # uploads) but it was permanent, because the file never shipped.
+    'config/labels.json': 'config/labels.json',
 }
 
 SPACE_REPO = os.environ.get('HF_SPACE_REPO_ID', 'sets-sto/warp-backend')

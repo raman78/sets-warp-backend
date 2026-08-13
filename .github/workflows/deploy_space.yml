@@ -23,6 +23,7 @@ on:
       - requirements.txt
       - space/Dockerfile
       - space/README.md
+      - config/labels.json      # shipped to the Space — see RUNTIME_FILES
       - deploy_space.py
       - .github/workflows/deploy_space.yml
   workflow_dispatch:

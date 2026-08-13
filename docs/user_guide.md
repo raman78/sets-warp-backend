@@ -19,7 +19,7 @@ for the end-to-end data flow see [`DATA_LIFECYCLE.md`](DATA_LIFECYCLE.md).
 | `GET /health` | Liveness check, returns `{"ok": true}` |
 | `GET /knowledge` | Merged pHash → item-name table |
 | `GET /model/version` | Metadata for the latest trained model |
-| `GET /config/labels` | Backend-side label map (screen types) |
+| `GET /config/labels` | Backend-side label map (screen types + slots) |
 
 ### Writing (bulk — preferred)
 

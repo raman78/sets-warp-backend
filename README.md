@@ -78,7 +78,7 @@ on a Render preview environment.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/health` | Liveness check |
+| `GET` | `/health` | Liveness check + whether ingestion validation is enforcing |
 | `GET` | `/knowledge` | Merged pHash → item-name table |
 | `GET` | `/model/version` | Latest trained model metadata |
 | `GET` | `/config/labels` | Backend-side label map |

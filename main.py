@@ -249,7 +249,17 @@ class AnchorsRequest(BaseModel):
 
 @app.get('/health')
 async def health():
-    return {'status': 'ok', 'repo': HF_REPO_ID}
+    # `validation` is here because an empty whitelist disables every ingestion
+    # gate: without it on the outside, a backend running wide open looks
+    # exactly like a healthy one.
+    labels = _get_labels()
+    n_types = len(labels.get('screen_types') or [])
+    return {
+        'status': 'ok',
+        'repo': HF_REPO_ID,
+        'validation': 'enforcing' if n_types else 'DISABLED (empty whitelist)',
+        'screen_types': n_types,
+    }
 
 
 @app.get('/model/version')
@@ -587,7 +597,16 @@ async def upload_anchors(req: AnchorsRequest, request: Request):
             rejected += 1
             reasons.append(f'build_type {grid.build_type!r} not in whitelist')
             continue
-        allowed_slots = set(slot_whitelist.get(grid.build_type) or [])
+        # A declared-but-empty slot list means "this screen has no icon slots"
+        # (DISCARD, the skill trees, SPECIALIZATIONS) — an anchor grid for it
+        # is invalid by definition. Only a *missing* entry leaves enforcement
+        # off, which is the fail-open above.
+        declared_slots = grid.build_type in slot_whitelist
+        allowed_slots  = set(slot_whitelist.get(grid.build_type) or [])
+        if declared_slots and not allowed_slots:
+            rejected += 1
+            reasons.append(f'build_type {grid.build_type!r} has no icon slots')
+            continue
         if allowed_slots:
             stray = [k for k in slots.keys() if k not in allowed_slots]
             if stray:
@@ -913,7 +932,13 @@ def _load_labels_bundled() -> dict:
     try:
         return json.loads(path.read_text(encoding='utf-8'))
     except Exception as e:
-        log.warning(f'bundled labels.json load failed: {e}')
+        # An empty whitelist switches every gate off (see the ingestion
+        # endpoints). That fail-open is deliberate for a transient outage, but
+        # a missing bundled file is not transient — it silently runs the
+        # backend with no validation at all, which is how this shipped for
+        # months. Loud, and visible on /health.
+        log.error(f'bundled labels.json load failed: {e} — '
+                  f'INGESTION VALIDATION IS DISABLED')
         return {'schema_version': 1, 'screen_types': [], 'slots': {}}
 
 
