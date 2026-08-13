@@ -83,10 +83,15 @@ SC_MIN_CLASS_SAMPLES = 5  # drop a class from training if it has fewer than this
 SC_MIN_KEEP         = 30  # per screen-type: below this count keep all samples
 SC_MAX_KEEP         = 150 # per screen-type: above SC_MIN_KEEP cap to this many
 
+# Classes the screen classifier is trained on. Narrower than the ingestion
+# whitelist on purpose: SPACE_/GROUND_ variants are stored but not trained as
+# separate classes (TRAITS has worked this way from the start), so the model
+# stays at one class per visually distinct screen.
 SCREEN_TYPES = [
     'SPACE_EQ', 'GROUND_EQ', 'TRAITS',
     'SPACE_BOFFS', 'GROUND_BOFFS', 'BOFFS',
     'SPECIALIZATIONS', 'SPACE_MIXED', 'GROUND_MIXED',
+    'SKILLS', 'DISCARD',
 ]
 
 # ── HF helpers ────────────────────────────────────────────────────────────────

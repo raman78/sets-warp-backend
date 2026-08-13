@@ -12,7 +12,11 @@
     "GROUND_BOFFS",
     "SPECIALIZATIONS",
     "SPACE_MIXED",
-    "GROUND_MIXED"
+    "GROUND_MIXED",
+    "SKILLS",
+    "SPACE_SKILLS",
+    "GROUND_SKILLS",
+    "DISCARD"
   ],
   "slots": {
     "SPACE_EQ": [

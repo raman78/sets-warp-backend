@@ -3,6 +3,19 @@
 ## [Unreleased]
 
 ### Added
+- **`SKILLS` / `SPACE_SKILLS` / `GROUND_SKILLS` / `DISCARD` accepted as screen
+  types.** The client has offered these labels since the skill-tree feature
+  landed, but `democratic_merge_screens.SCREEN_TYPES` dropped them on the way
+  from staging to `data/`, so neither could ever accumulate a single sample —
+  and `admin_train.SCREEN_TYPES` would have ignored them anyway. All three
+  lists now agree: ingestion whitelist (`config/labels.json`) and the merger
+  take all four, the classifier trains on `SKILLS` and `DISCARD` (the
+  `SPACE_`/`GROUND_` variants are stored but not separate classes, exactly as
+  `TRAITS` has always worked). `SC_MIN_CLASS_SAMPLES = 5` keeps a new class out
+  of the model until it has enough samples, so nothing changes until the data
+  is there. DISCARD matters because a screenshot with no build content on it
+  (a doff roster, a loading screen) currently has to be forced into one of the
+  build types.
 - **`/model/version` now reports the ArcFace embedder separately.** The
   payload carries `embedder_trained_at`, `embedder_n_classes` and
   `embedder_recall`, read from `models/icon_embedder_meta.json` on HF

@@ -96,6 +96,13 @@ SCREEN_TYPES = frozenset({
     'SPACE_EQ', 'GROUND_EQ', 'TRAITS', 'SPACE_TRAITS', 'GROUND_TRAITS',
     'BOFFS', 'SPACE_BOFFS', 'GROUND_BOFFS', 'SPECIALIZATIONS',
     'SPACE_MIXED', 'GROUND_MIXED',
+    # Skill trees and DISCARD: the client has offered these labels since the
+    # skill-tree feature landed, but every upload was refused at the door, so
+    # neither could ever accumulate samples. DISCARD is what a screenshot with
+    # no build content on it (a doff roster, a loading screen) should be
+    # classified as; without the class the model has to force it into one of
+    # the build types.
+    'SKILLS', 'SPACE_SKILLS', 'GROUND_SKILLS', 'DISCARD',
 })
 
 # Text-correction whitelist. Anything outside this slot set is ignored —
