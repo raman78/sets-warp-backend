@@ -34,6 +34,13 @@ def test_model_version():
         data = json.loads(r.read())
     if data.get('available'):
         print(f"   ✓ Model available: version={data.get('version')} trained_at={data.get('trained_at')}")
+        if data.get('embedder_trained_at'):
+            print(f"   ✓ Embedder: trained_at={data['embedder_trained_at']} "
+                  f"n_classes={data.get('embedder_n_classes')} "
+                  f"recall@1={data.get('embedder_recall')}")
+        else:
+            print("   ! No embedder_trained_at in payload — WARP clients cannot "
+                  "detect a newer ArcFace embedder.")
     else:
         print("   ✓ No model published yet.")
 

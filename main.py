@@ -856,7 +856,16 @@ def _fetch_staging_annotations(install_id: str) -> list[str]:
 
 
 def _load_model_version_from_hf() -> dict:
-    """Download models/model_version.json from HF."""
+    """
+    Download models/model_version.json from HF and stamp the ArcFace embedder
+    version onto it.
+
+    The softmax classifier and the ArcFace embedder are published by two
+    independent trainers (admin_train.py / admin_train_metric.py) with their own
+    cadence, so model_version.json alone cannot tell a client whether a newer
+    embedder is waiting. The embedder fields are advisory: when
+    icon_embedder_meta.json is missing they are simply absent from the payload.
+    """
     if not HF_REPO_ID:
         return {}
     try:
@@ -867,9 +876,34 @@ def _load_model_version_from_hf() -> dict:
             repo_type='dataset',
             token=HF_TOKEN or None,
         )
-        return json.loads(Path(path).read_text(encoding='utf-8'))
+        version = json.loads(Path(path).read_text(encoding='utf-8'))
     except Exception as e:
         log.debug(f'models/model_version.json not found: {e}')
+        return {}
+
+    embedder = _load_embedder_meta_from_hf()
+    if embedder.get('trained_at'):
+        version['embedder_trained_at'] = embedder['trained_at']
+        version['embedder_n_classes']  = embedder.get('n_classes', 0)
+        version['embedder_recall']     = embedder.get('val_recall@1', 0)
+    return version
+
+
+def _load_embedder_meta_from_hf() -> dict:
+    """Download models/icon_embedder_meta.json from HF (empty dict if absent)."""
+    if not HF_REPO_ID:
+        return {}
+    try:
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(
+            repo_id=HF_REPO_ID,
+            filename='models/icon_embedder_meta.json',
+            repo_type='dataset',
+            token=HF_TOKEN or None,
+        )
+        return json.loads(Path(path).read_text(encoding='utf-8'))
+    except Exception as e:
+        log.debug(f'models/icon_embedder_meta.json not found: {e}')
         return {}
 
 

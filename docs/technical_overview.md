@@ -86,7 +86,7 @@ for writes.
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | Liveness check, returns `{"ok": true}` |
-| `GET` | `/model/version` | Latest centrally-trained model metadata |
+| `GET` | `/model/version` | Latest centrally-trained model metadata — softmax (`trained_at`) **and** ArcFace embedder (`embedder_trained_at`), versioned separately |
 | `GET` | `/config/labels` | Backend-side label map (e.g. screen types) |
 | `GET` | `/knowledge` | Merged pHash → item-name lookup table |
 | `POST` | `/contribute` | Legacy single-shot pHash contribution |

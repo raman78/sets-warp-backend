@@ -3,6 +3,16 @@
 ## [Unreleased]
 
 ### Added
+- **`/model/version` now reports the ArcFace embedder separately.** The
+  payload carries `embedder_trained_at`, `embedder_n_classes` and
+  `embedder_recall`, read from `models/icon_embedder_meta.json` on HF
+  (`_load_embedder_meta_from_hf`). The softmax classifier and the embedder
+  are published by two workflows with different cadences —
+  `train_central_model.yml` is hourly but skips until ≥10 new crops have
+  merged, `train_metric_model.yml` is daily and unconditional — so a
+  single `trained_at` could not tell a client that a fresher embedder was
+  waiting. Missing meta ⇒ the fields are simply absent, and older clients
+  ignore them.
 - **Virtual-crop review tooling.** `admin_reject_crops.py` reviews colourful
   `__empty__`/`__inactive__` crops in `data/` (real icons the client logs as
   `CommunitySeed: POISON skip`): `--scan` (read-only) shallow-clones the

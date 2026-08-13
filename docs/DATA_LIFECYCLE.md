@@ -129,7 +129,10 @@ trainers, the audit) see [`technical_overview.md`](technical_overview.md).
 │            ├─ yes → hf_hub_download every required file          │
 │            │        copy to warp/models/ atomically              │
 │            │        reset_ml_session(), reload immediately       │
-│            └─ no  → skip                                         │
+│            └─ no  → remote.embedder_trained_at > local?          │
+│                       ├─ yes → download the 4 embedder files     │
+│                       │        only, then reset_ml_session()     │
+│                       └─ no  → skip                              │
 │                                                                  │
 │  Demotion guard: install only when remote is strictly newer.     │
 └──────────────────────────────────────────────────────────────────┘
@@ -138,6 +141,18 @@ trainers, the audit) see [`technical_overview.md`](technical_overview.md).
 End-to-end best case: roughly 3.5 h from client confirmation to model
 update on every install (10 min sync delay + ≤2 h merge wait + ≤1 h
 train + ≤15 min model-version poll on the recipient).
+
+**Two independent clocks.** `train_central_model.yml` (softmax) runs hourly
+but bails out until ≥ `MIN_NEW_CROPS` (10) *new* shas have landed since the
+manifest was written — note that crop *removals* do not count, so a
+rejection-only cleanup never triggers a retrain on its own.
+`train_metric_model.yml` (ArcFace) runs daily with no such threshold, so
+the embedder routinely gets ahead of the classifier. `/model/version`
+therefore carries both stamps — `trained_at` and `embedder_trained_at`
+(plus `embedder_n_classes`, `embedder_recall`), read from
+`models/icon_embedder_meta.json` — and the client compares them
+separately. Before that, a stalled classifier pinned every install to a
+stale embedder even though a fresher one was sitting on HF.
 
 ---
 
