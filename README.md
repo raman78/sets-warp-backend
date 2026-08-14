@@ -152,6 +152,8 @@ python main.py
 - [Data Lifecycle](docs/DATA_LIFECYCLE.md) — end-to-end data flow
 - [Technical Overview](docs/technical_overview.md) — components and contracts
 - [User Guide](docs/user_guide.md) — admin commands + recovery procedures
+- [Ingestion Validation](docs/INGESTION_VALIDATION.md) — the upload whitelist and what it gates
+- [Docs index](docs/README.md) — one line per document
 - [Agent Guidelines](CLAUDE.md) — AI-assisted-dev rules
 - [Changelog](CHANGELOG.md) — release notes
 

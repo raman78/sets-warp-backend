@@ -133,19 +133,10 @@ aspect ratio bounded to plausible monitor ratios (~0.5 – 3.56). Item
 names truncated at `MAX_NAME_LEN = 120`. Anything that fails validation
 is rejected with HTTP 4xx — never silently written to HF.
 
-On top of the regexes, `config/labels.json` is the whitelist:
-`screen_types[]` gates `/upload/screen-types` and the `build_type` of
-every anchor grid, and `slots[<build_type>]` gates the slot names inside
-a grid. A **declared but empty** slot list means the screen has no icon
-slots at all (`DISCARD`, the skill trees), so any anchor grid claiming it
-is rejected; a **missing** entry leaves that build type ungated.
-
-The whole whitelist fails open — an empty `screen_types[]` disables every
-gate — so that a transient HF outage cannot black-hole uploads. That is
-also its failure mode: the file must actually reach the Space
-(`RUNTIME_FILES` in `deploy_space.py`), or the backend runs wide open and
-looks perfectly healthy while doing it. `GET /health` reports which of
-the two states it is in.
+On top of the regexes, `config/labels.json` whitelists screen types, anchor
+build types and slot names. It fails open by design and has a three-link
+deploy chain that must hold for it to run at all — see
+[`INGESTION_VALIDATION.md`](INGESTION_VALIDATION.md).
 
 ### Webhook trigger
 
