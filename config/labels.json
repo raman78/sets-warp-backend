@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Canonical whitelist for backend ingestion. The runtime source of truth lives at HF dataset `sets-sto/sto-icon-dataset:config/labels.json`; this file is the bootstrap fallback baked into the backend, mirrored on disk so PRs can change the whitelist via code review.",
+  "description": "Canonical whitelist for backend ingestion. The runtime source of truth lives at HF dataset `sets-sto/sto-icon-dataset:config/labels.json`; this file is the bootstrap fallback baked into the backend, mirrored on disk so PRs can change the whitelist via code review. `screen_types` and `slots` are the screen-type vocabulary; `anchor_build_types` is the separate vocabulary anchor grids are keyed by, mapped to the screen types whose slot lists it inherits.",
   "screen_types": [
     "SPACE_EQ",
     "GROUND_EQ",
@@ -20,59 +20,164 @@
   ],
   "slots": {
     "SPACE_EQ": [
-      "Fore Weapons", "Deflector", "Sec-Def", "Engines", "Warp Core", "Shield",
-      "Aft Weapons", "Experimental", "Devices", "Universal Consoles",
-      "Engineering Consoles", "Science Consoles", "Tactical Consoles", "Hangars",
-      "Ship Name", "Ship Type", "Ship Tier"
+      "Fore Weapons",
+      "Deflector",
+      "Sec-Def",
+      "Engines",
+      "Warp Core",
+      "Shield",
+      "Aft Weapons",
+      "Experimental",
+      "Devices",
+      "Universal Consoles",
+      "Engineering Consoles",
+      "Science Consoles",
+      "Tactical Consoles",
+      "Hangars",
+      "Ship Name",
+      "Ship Type",
+      "Ship Tier"
     ],
     "GROUND_EQ": [
-      "Body Armor", "EV Suit", "Personal Shield", "Weapons", "Kit", "Kit Modules", "Ground Devices"
+      "Body Armor",
+      "EV Suit",
+      "Personal Shield",
+      "Weapons",
+      "Kit",
+      "Kit Modules",
+      "Ground Devices"
     ],
     "TRAITS": [
-      "Personal Space Traits", "Starship Traits", "Space Reputation", "Active Space Rep",
-      "Personal Ground Traits", "Ground Reputation", "Active Ground Rep"
+      "Personal Space Traits",
+      "Starship Traits",
+      "Space Reputation",
+      "Active Space Rep",
+      "Personal Ground Traits",
+      "Ground Reputation",
+      "Active Ground Rep"
     ],
     "SPACE_TRAITS": [
-      "Personal Space Traits", "Starship Traits", "Space Reputation", "Active Space Rep"
+      "Personal Space Traits",
+      "Starship Traits",
+      "Space Reputation",
+      "Active Space Rep"
     ],
     "GROUND_TRAITS": [
-      "Personal Ground Traits", "Ground Reputation", "Active Ground Rep"
+      "Personal Ground Traits",
+      "Ground Reputation",
+      "Active Ground Rep"
     ],
     "BOFFS": [
-      "Boff Tactical", "Boff Engineering", "Boff Science",
-      "Boff Intelligence", "Boff Command", "Boff Pilot", "Boff Miracle Worker", "Boff Temporal"
+      "Boff Tactical",
+      "Boff Engineering",
+      "Boff Science",
+      "Boff Intelligence",
+      "Boff Command",
+      "Boff Pilot",
+      "Boff Miracle Worker",
+      "Boff Temporal"
     ],
     "SPACE_BOFFS": [
-      "Boff Tactical", "Boff Engineering", "Boff Science",
-      "Boff Intelligence", "Boff Command", "Boff Pilot", "Boff Miracle Worker", "Boff Temporal"
+      "Boff Tactical",
+      "Boff Engineering",
+      "Boff Science",
+      "Boff Intelligence",
+      "Boff Command",
+      "Boff Pilot",
+      "Boff Miracle Worker",
+      "Boff Temporal"
     ],
     "GROUND_BOFFS": [
-      "Boff Tactical", "Boff Engineering", "Boff Science",
-      "Boff Intelligence", "Boff Command", "Boff Pilot", "Boff Miracle Worker", "Boff Temporal"
+      "Boff Tactical",
+      "Boff Engineering",
+      "Boff Science",
+      "Boff Intelligence",
+      "Boff Command",
+      "Boff Pilot",
+      "Boff Miracle Worker",
+      "Boff Temporal"
     ],
     "SPECIALIZATIONS": [
-      "Primary Specialization", "Secondary Specialization"
+      "Primary Specialization",
+      "Secondary Specialization"
     ],
     "SPACE_MIXED": [
-      "Fore Weapons", "Deflector", "Sec-Def", "Engines", "Warp Core", "Shield",
-      "Aft Weapons", "Experimental", "Devices", "Universal Consoles",
-      "Engineering Consoles", "Science Consoles", "Tactical Consoles", "Hangars",
-      "Ship Name", "Ship Type", "Ship Tier",
-      "Personal Space Traits", "Starship Traits", "Space Reputation", "Active Space Rep",
-      "Boff Tactical", "Boff Engineering", "Boff Science",
-      "Boff Intelligence", "Boff Command", "Boff Pilot", "Boff Miracle Worker", "Boff Temporal",
-      "Primary Specialization", "Secondary Specialization"
+      "Fore Weapons",
+      "Deflector",
+      "Sec-Def",
+      "Engines",
+      "Warp Core",
+      "Shield",
+      "Aft Weapons",
+      "Experimental",
+      "Devices",
+      "Universal Consoles",
+      "Engineering Consoles",
+      "Science Consoles",
+      "Tactical Consoles",
+      "Hangars",
+      "Ship Name",
+      "Ship Type",
+      "Ship Tier",
+      "Personal Space Traits",
+      "Starship Traits",
+      "Space Reputation",
+      "Active Space Rep",
+      "Boff Tactical",
+      "Boff Engineering",
+      "Boff Science",
+      "Boff Intelligence",
+      "Boff Command",
+      "Boff Pilot",
+      "Boff Miracle Worker",
+      "Boff Temporal",
+      "Primary Specialization",
+      "Secondary Specialization"
     ],
     "GROUND_MIXED": [
-      "Body Armor", "EV Suit", "Personal Shield", "Weapons", "Kit", "Kit Modules", "Ground Devices",
-      "Personal Ground Traits", "Ground Reputation", "Active Ground Rep",
-      "Boff Tactical", "Boff Engineering", "Boff Science",
-      "Boff Intelligence", "Boff Command", "Boff Pilot", "Boff Miracle Worker", "Boff Temporal",
-      "Primary Specialization", "Secondary Specialization"
+      "Body Armor",
+      "EV Suit",
+      "Personal Shield",
+      "Weapons",
+      "Kit",
+      "Kit Modules",
+      "Ground Devices",
+      "Personal Ground Traits",
+      "Ground Reputation",
+      "Active Ground Rep",
+      "Boff Tactical",
+      "Boff Engineering",
+      "Boff Science",
+      "Boff Intelligence",
+      "Boff Command",
+      "Boff Pilot",
+      "Boff Miracle Worker",
+      "Boff Temporal",
+      "Primary Specialization",
+      "Secondary Specialization"
     ],
     "SKILLS": [],
     "SPACE_SKILLS": [],
     "GROUND_SKILLS": [],
     "DISCARD": []
+  },
+  "anchor_build_types": {
+    "SPACE": [
+      "SPACE_EQ",
+      "SPACE_MIXED"
+    ],
+    "GROUND": [
+      "GROUND_EQ",
+      "GROUND_MIXED"
+    ],
+    "SPACE_TRAITS": [
+      "TRAITS"
+    ],
+    "BOFFS": [
+      "BOFFS"
+    ],
+    "SPEC": [
+      "SPECIALIZATIONS"
+    ]
   }
 }

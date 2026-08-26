@@ -15,12 +15,13 @@ coordinate ranges, aspect bounds) is listed in
 
 ## Source of truth
 
-`config/labels.json` — two keys:
+`config/labels.json` — three keys:
 
 | Key | Type | Meaning |
 |---|---|---|
-| `screen_types` | `list[str]` | Screen types accepted for upload, and the set of legal anchor `build_type` values |
-| `slots` | `dict[str, list[str]]` | Per build type, the slot names an anchor grid may carry |
+| `screen_types` | `list[str]` | Screen types accepted for upload |
+| `slots` | `dict[str, list[str]]` | Per **screen type**, the slot names it may carry |
+| `anchor_build_types` | `dict[str, list[str]]` | Per **build type**, the screen types it is folded from — and whose slot lists it inherits |
 
 Resolution order, in `_load_labels_from_hf` (`main.py:945`):
 
@@ -37,25 +38,67 @@ answers `Entry not found` for `config/labels.json` — so in practice the bundle
 file is what runs. Results are cached for `LABELS_CACHE_TTL = 300` s
 (`main.py:154`).
 
+### Two vocabularies, and why the third key exists
+
+An anchor grid is keyed by the client's *build type*, not by a screen type.
+WARP CORE folds one into the other before it writes `anchors.json`
+(`trainer_window._STYPE_TO_BUILD`):
+
+| Screen type | Build type |
+|---|---|
+| `SPACE_EQ`, `SPACE_MIXED` | `SPACE` |
+| `GROUND_EQ`, `GROUND_MIXED` | `GROUND` |
+| `TRAITS` | `SPACE_TRAITS` |
+| `BOFFS` | `BOFFS` |
+| `SPECIALIZATIONS` | `SPEC` |
+
+The anchor gate used to validate `build_type` against `screen_types[]`, which
+made `SPACE` and `GROUND` unrepresentable: every such grid was refused with
+`build_type 'SPACE' not in whitelist` and re-offered on the client's next sync,
+for good. `BOFFS` and `SPACE_TRAITS` passed only because the two vocabularies
+spell those the same. Measured against one maintainer's store: 112 of 176
+grids refused on the build type, another 11 on slots — a `TRAITS` screen mixes
+both environments, so a `SPACE_TRAITS` grid legitimately carries ground trait
+slots that `slots['SPACE_TRAITS']` does not list.
+
+`anchor_build_types` states the fold, so slot lists stay declared once, per
+screen type, and a build type inherits the union of its sources'. Both
+problems close: `SPACE_TRAITS → ['TRAITS']` inherits the mixed list.
+
+### Marker-keyed BOFF seats
+
+A slot name like `Boff Seat R[E+O]_484` carries what the detector saw, down to
+the marker's Y in pixels, so it cannot appear in any whitelist. The shape is
+fixed and that is what `_ANCHOR_SEAT_RE` checks —
+`Boff Seat <L|R>[<code>]_<n>`, with the seat code optional for the legacy form
+(`warp/recognition/boff_keys.py` in sto-warp). Anything else shaped like a
+seat key but not matching, `Boff Seat X[T]_1` for instance, is still refused.
+
 ## What each gate rejects
 
 | Endpoint | Field | Gate | Line |
 |---|---|---|---|
 | `POST /upload/screen-types` | `screen_type` | must be in `screen_types[]` | `main.py:497` |
-| `POST /upload/anchors` | `grid.build_type` | must be in `screen_types[]` | `main.py:560` |
-| `POST /upload/anchors` | `grid.slots` keys | must be in `slots[build_type]` | `main.py:604` |
+| `POST /upload/anchors` | `grid.build_type` | must be a key of `anchor_build_types` | `main.py:595` |
+| `POST /upload/anchors` | `grid.slots` keys | must be in the inherited slot union, or match `_ANCHOR_SEAT_RE` | `main.py:608` |
 
-Anchor slot checking distinguishes two cases that used to look the same:
+Anchor slot checking distinguishes two cases that used to look the same
+(`_anchor_whitelist`, `main.py:992`):
 
-| `slots[build_type]` | Meaning | Effect |
+| Inherited slot set | Meaning | Effect |
 |---|---|---|
-| missing | build type not described | no slot enforcement (fail-open) |
-| declared, empty | screen has no icon slots | **every** grid for it is rejected |
-| declared, non-empty | known slot set | stray slot names rejected |
+| build type absent from the map | not described | build type refused |
+| declared, empty | no icon slots on any source screen | **every** grid for it is refused |
+| declared, non-empty | known slot set | stray slot names refused |
+| map itself empty | bundled + HF both unusable | no enforcement (fail-open) |
 
-`DISCARD`, `SKILLS`, `SPACE_SKILLS` and `GROUND_SKILLS` are declared empty: a
-screenshot of a skill tree carries no icon slots, so a grid claiming one is
-invalid by construction.
+A build type is only as good as the screen types it inherits from: mapping one
+to `DISCARD` or a skill tree would give it an empty set and refuse every grid,
+which is correct — those screens carry no icon slots.
+
+An HF `labels.json` predating `anchor_build_types` falls back to the **bundled**
+map rather than switching the gate off, because the bundled copy ships with the
+code that reads it. Only a total failure of both fails open.
 
 ## Fail-open, and how it rotted
 

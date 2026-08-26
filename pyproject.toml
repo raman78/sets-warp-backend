@@ -19,6 +19,9 @@ dependencies = [
 # validation) via warp.data.cargo; the tools also fall back to a sibling
 # sto-warp checkout when it isn't pip-installed.
 admin = ["PySide6>=6.6.0", "sto-warp"]
+# Test suite (`tests/`). Not installed on the HF Space runtime either — the
+# suite runs on a maintainer's machine and in CI, never in production.
+dev = ["pytest>=8.0"]
 
 [project.scripts]
 warp-backend-setup = "setup:main"
@@ -28,14 +31,22 @@ warp-backend       = "main:app"
 requires      = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[tool.pytest.ini_options]
+# `tests/` only. `test_backend.py` in the root matches pytest's default
+# discovery pattern but is not a unit test — it is the smoke script that talks
+# to the live HF Space, and a bare `pytest` collecting it sends real requests
+# to production (and errors on `test_contribute`, which takes a screenshot
+# path). Run it deliberately: `python test_backend.py <screenshot>`.
+testpaths = ["tests"]
+
 [tool.sets-warp-backend]
-# Konfiguracja backendu — edytuj przed deployem
-# Wartości można nadpisać zmiennymi środowiskowymi (HF_TOKEN, HF_REPO_ID, itd.)
+# Backend configuration — edit before deploying
+# Values can be overridden by environment variables (HF_TOKEN, HF_REPO_ID, ...)
 
 [tool.sets-warp-backend.huggingface]
 repo_id   = "sets-sto/warp-knowledge"
-# token — NIE wpisuj tu! Ustaw jako zmienną środowiskową HF_TOKEN
-# lub wpisz w .env (który jest w .gitignore)
+# token — do NOT put it here. Set the HF_TOKEN environment variable,
+# or put it in .env (which is gitignored)
 
 [tool.sets-warp-backend.server]
 host            = "0.0.0.0"
@@ -43,7 +54,7 @@ port            = 8000
 max_req_per_ip  = 500
 
 [tool.sets-warp-backend.storage]
-# Ile dni trzymać surowe contributions zanim trafią do archiwum
+# How many days to keep raw contributions before they are archived
 contribution_retention_days = 90
-# Minimalna liczba potwierdzeń żeby wpis trafił do knowledge.json
+# Minimum number of confirmations before an entry enters knowledge.json
 min_confirmations = 2

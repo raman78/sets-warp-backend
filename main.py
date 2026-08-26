@@ -556,9 +556,8 @@ async def upload_anchors(req: AnchorsRequest, request: Request):
     rejected = 0
     reasons: list[str] = []
 
-    labels = _get_labels()
-    allowed_build_types = set(labels.get('screen_types') or [])
-    slot_whitelist      = labels.get('slots') or {}
+    labels         = _get_labels()
+    slot_whitelist = _anchor_whitelist(labels)
 
     for grid in req.grids:
         slots = grid.slots
@@ -593,22 +592,22 @@ async def upload_anchors(req: AnchorsRequest, request: Request):
         # config/labels.json. An empty whitelist (bundled load failed AND HF
         # unreachable) disables enforcement so we don't black-hole production
         # traffic on a transient outage — `_get_labels()` logs the warning.
-        if allowed_build_types and grid.build_type not in allowed_build_types:
+        if slot_whitelist and grid.build_type not in slot_whitelist:
             rejected += 1
             reasons.append(f'build_type {grid.build_type!r} not in whitelist')
             continue
-        # A declared-but-empty slot list means "this screen has no icon slots"
-        # (DISCARD, the skill trees, SPECIALIZATIONS) — an anchor grid for it
-        # is invalid by definition. Only a *missing* entry leaves enforcement
-        # off, which is the fail-open above.
+        # A declared-but-empty slot list means "this build type has no icon
+        # slots" — an anchor grid for it is invalid by definition. Only a
+        # *missing* entry leaves enforcement off, which is the fail-open above.
         declared_slots = grid.build_type in slot_whitelist
-        allowed_slots  = set(slot_whitelist.get(grid.build_type) or [])
+        allowed_slots  = slot_whitelist.get(grid.build_type) or set()
         if declared_slots and not allowed_slots:
             rejected += 1
             reasons.append(f'build_type {grid.build_type!r} has no icon slots')
             continue
         if allowed_slots:
-            stray = [k for k in slots.keys() if k not in allowed_slots]
+            stray = [k for k in slots.keys()
+                     if k not in allowed_slots and not _ANCHOR_SEAT_RE.match(k)]
             if stray:
                 rejected += 1
                 reasons.append(f'slots not in whitelist for {grid.build_type}: {stray[:3]}')
@@ -968,6 +967,50 @@ def _load_labels_from_hf() -> dict:
     except Exception as e:
         log.warning(f'config/labels.json load from HF failed ({e}); using bundled')
         return bundled
+
+
+# Anchor grids are keyed by the client's *build type*, and that is a different
+# vocabulary from the screen types the client learns them on: WARP CORE folds
+# SPACE_EQ and SPACE_MIXED into SPACE, GROUND_EQ and GROUND_MIXED into GROUND,
+# TRAITS into SPACE_TRAITS (`trainer_window._STYPE_TO_BUILD`). Checking one
+# against the other rejected every SPACE and GROUND grid ever sent — 112 of the
+# 176 in one maintainer's store — while BOFFS and SPACE_TRAITS went through
+# because the two vocabularies happen to spell those the same.
+#
+# `labels.json` therefore maps each build type to the screen types it is folded
+# from, so the slot lists stay declared once, per screen type, and a build type
+# inherits the union.
+#
+# Marker-keyed BOFF seats cannot be enumerated: their names carry what the
+# detector saw, down to the marker's Y in pixels (`Boff Seat R[E+O]_484`).
+# The shape is fixed, so the shape is what gets checked. Both documented forms
+# are covered, including the legacy one with no seat code
+# (`warp/recognition/boff_keys.py`).
+_ANCHOR_SEAT_RE = re.compile(r'^Boff Seat [LR](\[[A-Za-z+]+\])?_\d+$')
+
+
+def _anchor_whitelist(labels: dict) -> dict[str, set[str]]:
+    """Build type -> the slot names an anchor grid for it may carry.
+
+    An empty result switches enforcement off, the same fail-open the rest of
+    the ingestion gates use. A labels.json from before this key existed —
+    which is what HF serves until the dataset copy is reseeded — falls back to
+    the bundled map rather than disabling the gate, because the bundled copy
+    ships with the code that reads it.
+    """
+    sources = labels.get('anchor_build_types')
+    if not isinstance(sources, dict) or not sources:
+        sources = _load_labels_bundled().get('anchor_build_types') or {}
+        if sources:
+            log.info('labels.json has no anchor_build_types; using the bundled map')
+    slot_whitelist = labels.get('slots') or {}
+    out: dict[str, set[str]] = {}
+    for build_type, screen_types in sources.items():
+        allowed: set[str] = set()
+        for screen_type in screen_types or ():
+            allowed |= set(slot_whitelist.get(screen_type) or [])
+        out[build_type] = allowed
+    return out
 
 
 def _get_labels() -> dict:
