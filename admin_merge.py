@@ -553,6 +553,22 @@ Environment variables (.env):
             promoted_cids |= contribs_by_phash.get(ph, set())
         drain_paths = [p for p in all_paths if p.stem in promoted_cids]
 
+        # A contribution naming a virtual class can never enter knowledge.json
+        # — `_is_poison_name` refuses it unconditionally, by design, because a
+        # pHash override to `__empty__` would turn real icons into empty slots
+        # at confidence 1.0. It is therefore not pending a second vote like a
+        # SKIP: it is refused, and leaving it on disk is how a bucket of files
+        # nothing will ever read accumulates until somebody runs a script.
+        refused_ids = {(c.get('contribution_id') or '').strip()
+                       for c in contribs
+                       if _is_poison_name((c.get('item_name') or '').strip())}
+        refused = [p for p in all_paths
+                   if p.stem in refused_ids and p.stem not in promoted_cids]
+        if refused:
+            print(f'Draining {len(refused)} contribution(s) whose label can '
+                  f'never enter knowledge.json.')
+            drain_paths += refused
+
         if new_count == 0 and update_count == 0 and new_watermark == watermark and not drain_paths:
             # Same knowledge, same watermark — still worth writing back to
             # advance processed_ids so we don't re-pull the same SKIPs.

@@ -516,9 +516,45 @@ def _apply(
             ))
             rewritten_annos += 1
 
+    # 4. Sweep staging crops no remaining row refers to.
+    #
+    # A crop is only ever tallied through its row in
+    # `staging/<iid>/annotations.jsonl`, so a PNG with no row can never be
+    # promoted, drained or seen again — it is dead weight that only a manual
+    # script removed, and `admin_drain_stale_staging.py` had not run since
+    # 2026-07-17. Ten such files were in staging when this was written.
+    #
+    # They are cheap to prevent rather than to remember: after the trim above,
+    # anything under `staging/<iid>/crops/` whose sha is in no surviving row
+    # is swept. Content-addressed and idempotent, and it cannot take a crop
+    # that still has a vote — including a vote cast in this very batch, since
+    # `safe_promoted` rows are the ones being drained anyway.
+    kept_by_iid: dict[str, set[str]] = {}
+    for iid, records in staging_records.items():
+        kept_by_iid[iid] = {
+            (r.get('crop_sha256') or '').strip() for r in records
+            if (r.get('crop_sha256') or '').strip() not in safe_promoted
+        }
+    already_dropped = {op.path_in_repo for op in ops_drain}
+    swept = 0
+    for path in repo_files:
+        if not (path.startswith('staging/') and '/crops/' in path
+                and path.endswith('.png')):
+            continue
+        if path in already_dropped:
+            continue
+        parts = path.split('/')
+        iid, sha = parts[1], Path(parts[-1]).stem
+        if iid in kept_by_iid and sha not in kept_by_iid[iid]:
+            ops_drain.append(CommitOperationDelete(path_in_repo=path))
+            swept += 1
+    if swept:
+        print(f'Sweeping {swept} staging crop(s) no annotation row refers to.')
+
     print(f'Committing: 1 annotations file + {new_crops} new crops + '
-          f'drain({deleted_crops} stg crops, {rewritten_annos} stg ann '
-          f'trimmed, {deleted_annos} stg ann emptied)…')
+          f'drain({deleted_crops} stg crops, {swept} orphans swept, '
+          f'{rewritten_annos} stg ann trimmed, {deleted_annos} stg ann '
+          f'emptied)…')
 
     stamp = datetime.now(UTC).strftime('%Y-%m-%d %H:%M')
     _commit_in_stages(

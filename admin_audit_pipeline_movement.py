@@ -55,6 +55,45 @@ STAGING_PREFIX = 'staging/'
 DEFAULT_MAX_AGE_DAYS = 2
 
 
+def _residue(files: list[str]) -> list[str]:
+    """Staging files that no run can ever settle.
+
+    The mergers drain whatever they tally, so an entry that cannot be tallied
+    is not pending — it is left over, and it accumulates silently until
+    somebody remembers a cleanup script. `admin_drain_stale_staging.py` had
+    not run since 2026-07-17 when this was written, and ten crops were
+    sitting in staging with no annotation row to tally them.
+
+    Reported, never deleted: what produced it matters more than the file.
+    """
+    from collections import defaultdict
+
+    rows_by_iid: dict[str, set[str]] = defaultdict(set)
+    ann_by_iid:  set[str]            = set()
+    for f in files:
+        parts = f.split('/')
+        if len(parts) >= 3 and parts[0] == 'staging' and parts[-1] == 'annotations.jsonl':
+            ann_by_iid.add(parts[1])
+
+    # Reading the rows needs file contents, which this audit deliberately does
+    # not download. An install with crops but no annotations file at all is
+    # detectable from the listing alone, and is the shape that actually
+    # occurred.
+    crops_by_iid: dict[str, int] = defaultdict(int)
+    for f in files:
+        parts = f.split('/')
+        if (len(parts) >= 4 and parts[0] == 'staging'
+                and parts[2] == 'crops' and f.endswith('.png')):
+            crops_by_iid[parts[1]] += 1
+
+    out: list[str] = []
+    for iid, n in sorted(crops_by_iid.items()):
+        if iid not in ann_by_iid:
+            out.append(f'{n} crop(s) under staging/{iid}/ with no '
+                       f'annotations.jsonl — nothing can tally them')
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description='Fail when the crop pipeline stops moving.')
@@ -96,9 +135,22 @@ def main() -> int:
         print(f'last promotion        : {last_promotion:%Y-%m-%d %H:%M} UTC '
               f'({age.days}d {age.seconds // 3600}h ago)')
 
-    if not staging_crops:
+    residue = _residue(files)
+    if residue:
+        print()
+        for line in residue:
+            print(f'  RESIDUE: {line}')
+
+    if not staging_crops and not residue:
         print('\nOK — nothing is waiting, so a quiet `data/` is expected.')
         return 0
+
+    if residue:
+        print('\nBREACH — staging holds files no run can settle. The mergers '
+              'drain what they tally, so this is left over from a failure or '
+              'from a path nothing reads. It should never need a manual '
+              'script; find what produced it.')
+        return 1
 
     if last_promotion is None:
         print(f'\nBREACH — {len(staging_crops)} crops are waiting and `data/` has '

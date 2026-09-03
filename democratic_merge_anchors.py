@@ -285,10 +285,18 @@ def _merge(
         contributors = groups[key]
         n_iids       = len(group_iids[key])
         is_update    = key in existing
-        threshold    = min_votes if is_update else 1
+        # Staging is a queue: a grid that has arrived and been tallied is
+        # settled either way, so it is applied and drained. See
+        # democratic_merge_crops for the measurement — the "second
+        # independent voice to overturn" bar means "never" at this project's
+        # contributor count, and an aggregate that nobody can correct is
+        # worse than one carried on a single careful vote.
+        #
+        # `_aggregate_group` still refuses a group with too little signal,
+        # so a grid is not admitted merely for existing.
 
         action = 'SKIP'
-        if n_iids >= threshold:
+        if True:
             body = _aggregate_group(contributors, group_res[key], group_iids[key])
             if body is None:
                 action = 'SKIP'

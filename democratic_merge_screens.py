@@ -284,8 +284,18 @@ def _merge_screens(
         winner, count = c.most_common(1)[0]
         old_rec       = existing.get(sha)
         old_type      = (old_rec or {}).get('type', '')
-        threshold     = min_votes if sha in existing else 1
-        accepted      = count >= threshold
+        # Staging is a queue: an entry has arrived from a client, has not
+        # been tallied, and is not in the models. Tallying settles it either
+        # way, so every entry is applied and staging empties. The vote count
+        # records confidence on the entry instead of gating entry to it —
+        # accumulating on agreement, resetting when a verdict is superseded,
+        # with the superseded one kept so an overturn stays auditable.
+        #
+        # See democratic_merge_crops for the measurement that prompted this:
+        # the "second independent voice to overturn" bar is sound for a crowd
+        # and equal to "never" for a project with two contributors.
+        accepted = True
+        old_votes     = int((old_rec or {}).get('votes') or 0)
 
         action = 'SKIP'
         if accepted:
@@ -296,11 +306,18 @@ def _merge_screens(
             else:
                 action = 'NEW'
             losers = {t: v for t, v in c.most_common()[1:4] if t != winner}
+            if action == 'unchanged':
+                total_votes = old_votes + count
+                losers = {**((old_rec or {}).get('losers') or {}), **losers}
+            else:
+                total_votes = count
+            if action == 'UPDATE':
+                losers = {old_type: old_votes or 1, **losers}
             rec: dict = {
                 'schema_version': 2,
                 'sha':        sha,
                 'type':       winner,
-                'votes':      count,
+                'votes':      total_votes,
                 'updated_at': datetime.now(UTC).isoformat(timespec='seconds')
                                               .replace('+00:00', 'Z'),
             }
@@ -343,8 +360,9 @@ def _merge_text(
             continue
         old_rec   = existing.get(ml)
         old_name  = (old_rec or {}).get('name', '')
-        threshold = min_votes if ml in existing else 1
-        accepted  = count >= threshold
+        # Same queue model as the screen-type ballot above.
+        accepted  = True
+        old_votes = int((old_rec or {}).get('votes') or 0)
 
         action = 'SKIP'
         if accepted:
@@ -355,11 +373,18 @@ def _merge_text(
             else:
                 action = 'NEW'
             losers = {n: v for n, v in c.most_common()[1:4] if n != winner}
+            if action == 'unchanged':
+                total_votes = old_votes + count
+                losers = {**((old_rec or {}).get('losers') or {}), **losers}
+            else:
+                total_votes = count
+            if action == 'UPDATE':
+                losers = {old_name: old_votes or 1, **losers}
             rec: dict = {
                 'schema_version': 2,
                 'ml_name':    ml,
                 'name':       winner,
-                'votes':      count,
+                'votes':      total_votes,
                 'updated_at': datetime.now(UTC).isoformat(timespec='seconds')
                                               .replace('+00:00', 'Z'),
             }
