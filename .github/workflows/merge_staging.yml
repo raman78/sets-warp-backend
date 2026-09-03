@@ -65,6 +65,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          set -o pipefail   # a crashed step must not be green
           pip install --quiet huggingface_hub requests
 
       - name: Merge crops (staging/<iid>/crops → data/crops + annotations.jsonl)
@@ -73,6 +74,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           WARP_NO_VENV: '1'
         run: |
+          set -o pipefail   # a crashed step must not be green
           MIN_VOTES="${{ github.event.inputs.min_votes || '2' }}"
           python democratic_merge_crops.py --apply --min "$MIN_VOTES" | tee /tmp/merge_crops.log
 
@@ -81,6 +83,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          set -o pipefail   # a crashed step must not be green
           MIN_VOTES="${{ github.event.inputs.min_votes || '2' }}"
           python democratic_merge_anchors.py --apply --min "$MIN_VOTES" | tee /tmp/merge_anchors.log
 
@@ -89,6 +92,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          set -o pipefail   # a crashed step must not be green
           MIN_VOTES="${{ github.event.inputs.min_votes || '2' }}"
           python democratic_merge_screens.py --apply --min "$MIN_VOTES" | tee /tmp/merge_screens.log
 
@@ -98,12 +102,14 @@ jobs:
           HF_TOKEN:   ${{ secrets.HF_TOKEN }}
           HF_REPO_ID: ${{ secrets.HF_REPO_ID || 'sets-sto/warp-knowledge' }}
         run: |
+          set -o pipefail   # a crashed step must not be green
           MIN_VOTES="${{ github.event.inputs.min_votes || '2' }}"
           python admin_merge.py --apply --min "$MIN_VOTES" | tee /tmp/merge_knowledge.log
 
       - name: Drain summary (post-audit TODO #5)
         if: ${{ always() }}
         run: |
+          set -o pipefail   # a crashed step must not be green
           {
             echo '## Democratic-merge DRAIN summary'
             echo

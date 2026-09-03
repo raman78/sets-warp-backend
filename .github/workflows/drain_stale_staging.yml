@@ -61,6 +61,7 @@ jobs:
           HF_REPO_ID: ${{ secrets.HF_REPO_ID || 'sets-sto/warp-knowledge' }}
           WARP_NO_VENV: '1'
         run: |
+          set -o pipefail   # a crashed step must not be green
           APPLY_FLAG=""
           if [ "${{ github.event.inputs.dry_run }}" = "false" ]; then
             APPLY_FLAG="--apply"
@@ -75,6 +76,7 @@ jobs:
       - name: Publish summary
         if: ${{ always() }}
         run: |
+          set -o pipefail   # a crashed step must not be green
           MODE='DRY-RUN'
           if [ "${{ github.event.inputs.dry_run }}" = "false" ]; then
             MODE='APPLY'

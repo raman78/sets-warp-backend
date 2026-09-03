@@ -1,0 +1,75 @@
+# .github/workflows/audit_pipeline_movement.yml
+#
+# Pipeline Movement Audit — is anything still flowing?
+# ====================================================
+# Runs admin_audit_pipeline_movement.py (read-only) every morning. Fails when
+# uploads are piling up in staging/ while data/ has not been written for
+# --max-age-days.
+#
+# Why this exists, and why daily rather than monthly like the other two
+# audits: on 2026-07-16 the crop merge started failing on every scheduled run
+# and reported success for seven weeks. It was found by hand, tracing an
+# unrelated crop. The other audits check a state — how much has piled up, how
+# much is mislabeled — and a stalled pipeline looks healthy to both of them
+# right up until the pile is enormous.
+#
+# This one checks movement instead, and is deliberately blind to the cause:
+# a bad token, a raised vote threshold, a crashed merger and an opaque HTTP
+# 400 all look the same from here, and all of them are worth an email the
+# next morning.
+#
+# Runs after the mergers have had their overnight windows (the merge is
+# scheduled every two hours), so a breach means several attempts failed, not
+# that one was unlucky.
+
+name: Pipeline Movement Audit
+
+on:
+  schedule:
+    - cron: '0 7 * * *'   # daily, 07:00 UTC
+  workflow_dispatch:
+    inputs:
+      max_age_days:
+        description: 'Days data/ may stand still while staging holds work (default: 2)'
+        required: false
+        default: '2'
+        type: string
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install --quiet 'huggingface_hub>=1.7.2'
+
+      - name: Audit pipeline movement
+        id: audit
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          WARP_NO_VENV: '1'
+        run: |
+          set -o pipefail   # a crashed step must not be green
+          MAX_AGE="${{ github.event.inputs.max_age_days || '2' }}"
+          python admin_audit_pipeline_movement.py --max-age-days "$MAX_AGE" | tee /tmp/audit_movement.log
+
+      - name: Publish summary
+        if: ${{ always() }}
+        run: |
+          set -o pipefail   # a crashed step must not be green
+          {
+            echo '## Pipeline movement'
+            echo '```'
+            cat /tmp/audit_movement.log 2>/dev/null || echo '(no output — the audit did not run)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

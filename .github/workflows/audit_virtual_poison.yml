@@ -52,12 +52,14 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           WARP_NO_VENV: '1'
         run: |
+          set -o pipefail   # a crashed step must not be green
           MAX="${{ github.event.inputs.max || '0' }}"
           python admin_audit_virtual_poison.py --max "$MAX" | tee /tmp/audit_poison.log
 
       - name: Publish summary
         if: ${{ always() }}
         run: |
+          set -o pipefail   # a crashed step must not be green
           {
             echo '## Virtual-Poison Audit'
             echo

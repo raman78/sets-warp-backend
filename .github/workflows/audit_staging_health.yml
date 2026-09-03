@@ -74,6 +74,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           WARP_NO_VENV: '1'
         run: |
+          set -o pipefail   # a crashed step must not be green
           CROPS_MAX="${{ github.event.inputs.crops_max || '100' }}"
           SCR_MAX="${{ github.event.inputs.screens_max || '50' }}"
           CON_MAX="${{ github.event.inputs.contribs_max || '50' }}"
@@ -90,6 +91,7 @@ jobs:
       - name: Publish summary
         if: ${{ always() }}
         run: |
+          set -o pipefail   # a crashed step must not be green
           {
             echo '## Staging Health Audit'
             echo
