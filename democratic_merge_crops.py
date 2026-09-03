@@ -285,14 +285,35 @@ def _merge(
         old_rec       = existing.get(sha)
         old_name      = (old_rec or {}).get('name', '')
 
-        threshold = min_votes if sha in existing else 1
-        accepted  = count >= threshold
+        # The threshold guards *changing* a verdict, not confirming one.
+        # A staging vote that agrees with what data/ already says has done
+        # its job the moment it is counted: it is corroboration, there is
+        # nothing to decide, and holding it back only means re-tallying the
+        # same vote every two hours for ever. Measured 2026-09-03 before
+        # this: 3897 of the 4003 entries in staging were exactly that, and
+        # `unchanged` was unreachable — a single-contributor install could
+        # never drain one.
+        #
+        # Overturning a verdict still needs a second, independent voice, and
+        # a crop nobody has seen before still needs only one.
+        if sha not in existing:
+            accepted = True
+        elif old_name == winner:
+            accepted = True
+        else:
+            accepted = count >= min_votes
 
         action = 'SKIP'
-        if accepted:
-            if old_name == winner:
-                action = 'unchanged'
-            elif old_name:
+        if accepted and old_name == winner:
+            # Confirmed, not changed: leave the record in data/ exactly as it
+            # is. Rewriting it would replace the vote count and the recorded
+            # dissent from whenever the verdict was set with this batch's —
+            # a single confirming vote would report the consensus as 1. The
+            # sha still counts as promoted so the staging copy drains.
+            action = 'unchanged'
+            promoted_shas.add(sha)
+        elif accepted:
+            if old_name:
                 action = 'UPDATE'
             else:
                 action = 'NEW'
