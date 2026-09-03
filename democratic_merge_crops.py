@@ -69,6 +69,23 @@ RTYPE = 'dataset'
 
 DATA_ANN = 'data/annotations.jsonl'
 DATA_CRP = 'data/crops'
+
+# HF refuses a push that would leave more than 10 000 files in one directory,
+# and `data/crops/` filled up: the promotion froze on 2026-07-16 with the
+# folder at ~9 985 and every run since died on a 400 the server would not
+# explain until the message was read in full. New crops go under a two-hex
+# shard of their own sha. The flat files predate it and are migrated in their
+# own pass, so both layouts have to be readable meanwhile.
+
+def crop_path(sha: str) -> str:
+    """Where a crop is written today."""
+    return f'{DATA_CRP}/{sha[:2]}/{sha}.png'
+
+
+def crop_paths(sha: str) -> tuple[str, str]:
+    """Both places a crop may live — sharded first, then the legacy flat one."""
+    return crop_path(sha), f'{DATA_CRP}/{sha}.png'
+
 # Maintainer review ledger written by admin_reject_crops.py. Shas decided
 # REJECT there must never be re-promoted, even if a user re-uploads the same
 # colourful crop that was mislabeled __empty__/__inactive__.
@@ -411,8 +428,8 @@ def _apply(
     missing: list[str] = []
     new_crops = 0
     for sha in merged:
-        dst = f'{DATA_CRP}/{sha}.png'
-        if dst in repo_files:
+        dst = crop_path(sha)
+        if dst in repo_files or f'{DATA_CRP}/{sha}.png' in repo_files:
             continue
         src = crop_src.get(sha)
         if not src:

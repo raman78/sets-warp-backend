@@ -814,12 +814,17 @@ def train(winner_labels: dict[str, str],
         if dest.exists():
             return True
         dest.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with _opener.open(f'{_hf_base}/data/crops/{sha}.png') as r:
-                dest.write_bytes(r.read())
-            return True
-        except Exception:
-            return False
+        # Sharded first, then the legacy flat path: HF caps a directory at
+        # 10 000 files, so new crops live under `data/crops/<ab>/`. The local
+        # cache stays flat — the filename is the content sha.
+        for _rel in (f'data/crops/{sha[:2]}/{sha}.png', f'data/crops/{sha}.png'):
+            try:
+                with _opener.open(f'{_hf_base}/{_rel}') as r:
+                    dest.write_bytes(r.read())
+                return True
+            except Exception:
+                continue
+        return False
 
     all_shas = list(winner_labels.keys())
     print(f'\nDownloading {len(all_shas)} crops from data/crops/...')

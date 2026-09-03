@@ -82,6 +82,23 @@ RTYPE = 'dataset'
 
 DATA_ANN = 'data/annotations.jsonl'
 DATA_CRP = 'data/crops'
+
+# HF refuses a push that would leave more than 10 000 files in one directory,
+# and `data/crops/` filled up: the promotion froze on 2026-07-16 with the
+# folder at ~9 985 and every run since died on a 400 the server would not
+# explain until the message was read in full. New crops go under a two-hex
+# shard of their own sha. The flat files predate it and are migrated in their
+# own pass, so both layouts have to be readable meanwhile.
+
+def crop_path(sha: str) -> str:
+    """Where a crop is written today."""
+    return f'{DATA_CRP}/{sha[:2]}/{sha}.png'
+
+
+def crop_paths(sha: str) -> tuple[str, str]:
+    """Both places a crop may live — sharded first, then the legacy flat one."""
+    return crop_path(sha), f'{DATA_CRP}/{sha}.png'
+
 LEDGER   = 'data/reviewed_virtual.jsonl'
 
 VIRTUAL_LABELS = frozenset({'__empty__', '__inactive__'})
@@ -253,14 +270,17 @@ def _fetch_crop(sha: str, token: str,
             if img is not None:
                 return img
     from huggingface_hub import hf_hub_download
-    try:
-        local = hf_hub_download(
-            repo_id=REPO, repo_type=RTYPE, token=token,
-            filename=f'{DATA_CRP}/{sha}.png',
-        )
-    except Exception:
-        return None
-    return cv2.imread(local)
+    for path in crop_paths(sha):
+        try:
+            local = hf_hub_download(
+                repo_id=REPO, repo_type=RTYPE, token=token, filename=path,
+            )
+        except Exception:
+            continue
+        img = cv2.imread(local)
+        if img is not None:
+            return img
+    return None
 
 
 def scan(snap_dir: Path,
@@ -521,10 +541,11 @@ def apply(snap_dir: Path, decisions: list[dict], api, repo_files: set[str],
     # 2. Delete rejected crop PNGs from data/crops/.
     deleted_crops = 0
     for sha in reject:
-        dst = f'{DATA_CRP}/{sha}.png'
-        if dst in repo_files:
-            ops.append(CommitOperationDelete(path_in_repo=dst))
-            deleted_crops += 1
+        # Either layout — a rejected crop must go wherever it currently sits.
+        for dst in crop_paths(sha):
+            if dst in repo_files:
+                ops.append(CommitOperationDelete(path_in_repo=dst))
+                deleted_crops += 1
 
     # 3. Drain any lingering staging copies of rejected shas so the next
     #    democratic_merge run cannot re-promote them.
