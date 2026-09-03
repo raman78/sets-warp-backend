@@ -122,12 +122,27 @@ def clone_hf_shallow(
                       f'sleeping {delay:.0f}s', file=sys.stderr, flush=True)
                 time.sleep(delay)
 
+    # Fast-forward an existing cache — one attempt, not five.
+    #
+    # The retry schedule below exists for HF throttling, where waiting is the
+    # cure. A fetch into a wedged shallow clone is not that: it fails the same
+    # way every time, so the backoff spends ~22 minutes arriving at the answer
+    # it had after the first second. Seen on 2026-09-04 as
+    # `fatal: expected 'acknowledgments'`, cured instantly by deleting the
+    # directory — which is exactly what the fresh-clone path below does.
+    #
+    # So the cheap path gets one shot and any failure falls through to the
+    # path that works from nothing. A genuine 429 is not lost: the clone
+    # keeps the full retry schedule.
     if (cache_dir / '.git').exists():
-        _git_with_retry(['-c', f'http.extraHeader={auth_header}',
-                         'fetch', '--depth', '1', 'origin', 'HEAD'],
-                        cwd=cache_dir, label='fetch')
-        _git(['reset', '--hard', 'FETCH_HEAD'], cwd=cache_dir)
-        return cache_dir
+        try:
+            _git(['-c', f'http.extraHeader={auth_header}',
+                  'fetch', '--depth', '1', 'origin', 'HEAD'], cwd=cache_dir)
+            _git(['reset', '--hard', 'FETCH_HEAD'], cwd=cache_dir)
+            return cache_dir
+        except subprocess.CalledProcessError:
+            print('  HF fetch into the cached clone failed — discarding it '
+                  'and cloning fresh', file=sys.stderr, flush=True)
 
     if cache_dir.exists():
         shutil.rmtree(cache_dir)

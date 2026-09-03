@@ -53,3 +53,36 @@ def test_the_redaction_leaves_everything_else_readable():
 
 def test_redaction_is_a_no_op_without_a_token():
     assert hf_clone._redact('git fetch origin', '') == 'git fetch origin'
+
+
+# ── A wedged cache must not cost 22 minutes ────────────────────────────────
+
+def test_a_failed_fast_forward_falls_through_to_a_fresh_clone(monkeypatch, tmp_path):
+    """The retry schedule is for HF throttling, where waiting is the cure. A
+    fetch into a wedged shallow clone fails the same way every time — seen as
+    `fatal: expected 'acknowledgments'`, cured by deleting the directory.
+    """
+    import time as _time
+
+    cache = tmp_path / 'warp-hf-clone' / 'some__repo'
+    (cache / '.git').mkdir(parents=True)
+    monkeypatch.setenv('XDG_CACHE_HOME', str(tmp_path))
+    monkeypatch.setattr(_time, 'sleep', lambda *_a: None)
+
+    calls: list[str] = []
+
+    def _run(cmd, **kw):
+        verb = next((c for c in cmd if c in ('fetch', 'clone', 'reset')), '?')
+        calls.append(verb)
+        if verb == 'fetch':
+            raise subprocess.CalledProcessError(128, cmd)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, 'run', _run)
+    monkeypatch.setattr(hf_clone, '_preflight', lambda *a, **k: None,
+                        raising=False)
+
+    hf_clone.clone_hf_shallow('some/repo', TOKEN, repo_type='dataset')
+
+    assert calls.count('fetch') == 1, 'the doomed fetch was retried'
+    assert 'clone' in calls, 'never fell through to a fresh clone'
