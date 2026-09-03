@@ -198,9 +198,10 @@ def test_a_name_cargo_does_not_know_is_flagged(dataset, monkeypatch):
     assert out[0]['name'] == 'Item b'
 
 
-def test_a_placeholder_slot_is_flagged(dataset, monkeypatch):
-    """Over half of one production sample carried `slot='migrated'` — a
-    leftover from an old import rather than a slot the game has."""
+def test_a_placeholder_slot_is_not_a_signal(dataset, monkeypatch):
+    """`slot='migrated'` sits on 2848 of 12274 entries, so it ranks nothing
+    and buried the two signals that do. It is also not a defect: every one of
+    those crops is icon-shaped, so none has leaked into the k-NN pool."""
     data, crops = dataset
     monkeypatch.setattr(tool, 'load_canonical_names',
                         lambda: {f'Item {c}' for c in 'abc'})
@@ -208,7 +209,7 @@ def test_a_placeholder_slot_is_flagged(dataset, monkeypatch):
 
     out = tool._scan_weakest(data, {}, '', crops, False, limit=3)
 
-    assert 'no-real-slot' in out[0]['why']
+    assert all('no-real-slot' not in e['why'] for e in out)
 
 
 def test_an_unremarkable_entry_carries_no_flag(dataset, monkeypatch):

@@ -332,9 +332,17 @@ def _scan_weakest(data: dict[str, dict],
         # exporter cannot write it, and no user typed it on purpose.
         if canon and name not in canon:
             flags.append('name-not-in-cargo')
-        # A placeholder slot from an old migration rather than a real one.
-        if (rec.get('slot') or '').strip() in ('', 'migrated'):
-            flags.append('no-real-slot')
+        # `slot='migrated'` was a flag here and has been dropped. It fires on
+        # 2848 of 12274 entries — a quarter of the dataset — so it ranks
+        # nothing, and it buried the two signals that do: an overturned
+        # verdict and a name cargo cannot resolve.
+        #
+        # It is also not the defect it looked like. Measured 2026-09-04: all
+        # 2848 are icon-shaped crops, none is a text band, so nothing has
+        # leaked into the k-NN pool through the slot check that guards it.
+        # The field is unread placeholder metadata from an old import, and
+        # 743 of them could not be recovered from the name anyway — a
+        # universal console genuinely belongs to four console slots.
         scored.append((-len(flags), votes, sha, rec, prior, flags))
     scored.sort(key=lambda t: (t[0], t[1], t[2]))
     scored = scored[:limit]
