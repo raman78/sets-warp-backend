@@ -35,7 +35,7 @@ import cv2
 import numpy as np
 
 from PySide6.QtCore import Qt, QProcess
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QCompleter, QHBoxLayout, QHeaderView, QLabel,
     QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSplitter,
@@ -54,8 +54,10 @@ REPO_DIR = Path(__file__).parent
 DECISIONS = ('REJECT', 'KEEP', 'RELABEL')
 
 # Table columns.
-COL_THUMB, COL_SHA, COL_LABEL, COL_SLOT, COL_STATS, COL_DECISION, COL_RELABEL = range(7)
+(COL_THUMB, COL_SHA, COL_LABEL, COL_SLOT, COL_WHY, COL_STATS,
+ COL_DECISION, COL_RELABEL) = range(8)
 _THUMB_PX = 64
+_PREVIEW_PX = 256
 
 
 def _bgr_to_pixmap(bgr: np.ndarray, size: int = _THUMB_PX) -> QPixmap:
@@ -87,18 +89,22 @@ def _parse_tsv(path: Path) -> list[dict]:
             'slot':     p[4].strip(),
             'bright':   p[5].strip(),
             'rich':     p[6].strip(),
+            # Appended after the fact, so a TSV written before the second
+            # scan direction existed still parses.
+            'why':      p[7].strip() if len(p) > 7 else '',
         })
     return rows
 
 
 def _write_tsv(path: Path, rows: list[dict]) -> None:
-    lines = ['# decision\tidx\tsha\tlabel\tslot\tbright\trich',
+    lines = ['# decision\tidx\tsha\tlabel\tslot\tbright\trich\twhy',
              '# decision ∈ {REJECT, KEEP, RELABEL <canonical name>}']
     for r in rows:
         verb = r['decision']
         first = f'{verb} {r["relabel"]}'.strip() if verb == 'RELABEL' else verb
         lines.append(f'{first}\t{r["idx"]}\t{r["sha"]}\t{r["label"]}\t'
-                     f'{r["slot"]}\t{r["bright"]}\t{r["rich"]}')
+                     f'{r["slot"]}\t{r["bright"]}\t{r["rich"]}\t'
+                     f'{r.get("why", "")}')
     path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
 
@@ -109,6 +115,8 @@ class AdminConsole(QMainWindow):
         self.resize(1000, 720)
         self._proc: QProcess | None = None
         self._decisions_path = REPO_DIR / DEFAULT_DECISIONS
+        self._rows: list[dict] = []
+        self._images: dict[int, object] = {}
         # Cargo names for the RELABEL picker — from sto-warp's own loader.
         self._cargo = sorted(load_canonical_names())
         # Local crop mirror for thumbnails (avoids re-downloading from HF).
@@ -120,7 +128,13 @@ class AdminConsole(QMainWindow):
 
         # ── Action bar ──────────────────────────────────────────────────
         bar = QHBoxLayout()
-        self.btn_scan   = QPushButton('Scan virtual crops')
+        self.cmb_direction = QComboBox()
+        self.cmb_direction.addItems(['both', 'virtual', 'real'])
+        self.cmb_direction.setToolTip(
+            'virtual — a colourful crop labelled __empty__/__inactive__\n'
+            'real    — a blank cell labelled with an item name\n'
+            'both    — one review pass over the two')
+        self.btn_scan   = QPushButton('Scan mislabelled crops')
         self.btn_apply  = QPushButton('Apply decisions')
         self.btn_merge  = QPushButton('Merge (dry-run)')
         self.btn_audit  = QPushButton('Audit staging')
@@ -130,6 +144,8 @@ class AdminConsole(QMainWindow):
             lambda: self._run(['democratic_merge_crops.py']))
         self.btn_audit.clicked.connect(
             lambda: self._run(['admin_audit_staging.py']))
+        bar.addWidget(QLabel('direction:'))
+        bar.addWidget(self.cmb_direction)
         for b in (self.btn_scan, self.btn_apply, self.btn_merge, self.btn_audit):
             bar.addWidget(b)
         bar.addStretch(1)
@@ -137,15 +153,49 @@ class AdminConsole(QMainWindow):
         bar.addWidget(self.status)
         root.addLayout(bar)
 
+        # ── Review pane ─────────────────────────────────────────────────
+        # The table alone is an overview: a 64 px thumbnail is too small to
+        # tell a dim icon from an empty cell, which is the whole judgement
+        # being made here. The selected crop is shown large beside it, and
+        # the decision keys advance to the next row, so the pass is one crop
+        # at a time rather than a grid to scan.
+        self.preview = QLabel('select a row')
+        self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview.setMinimumSize(_PREVIEW_PX + 16, _PREVIEW_PX + 16)
+        self.preview.setStyleSheet('background:#141414; border:1px solid #333;')
+        self.preview_info = QLabel('')
+        self.preview_info.setWordWrap(True)
+        self.preview_info.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.preview_hint = QLabel(
+            'K keep · R reject · L relabel · ↑ ↓ move')
+        self.preview_hint.setStyleSheet('color:#888;')
+
+        side = QVBoxLayout()
+        side.addWidget(self.preview)
+        side.addWidget(self.preview_info)
+        side.addWidget(self.preview_hint)
+        side.addStretch(1)
+        side_w = QWidget()
+        side_w.setLayout(side)
+
         # ── Table + log split ───────────────────────────────────────────
         split = QSplitter(Qt.Orientation.Vertical)
-        self.table = QTableWidget(0, 7)
+        self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels(
-            ['', 'sha', 'label', 'slot', 'bright/rich', 'decision', 'relabel name'])
+            ['', 'sha', 'label', 'slot', 'flagged as', 'bright/rich',
+             'decision', 'relabel name'])
         self.table.verticalHeader().setDefaultSectionSize(_THUMB_PX + 4)
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(COL_RELABEL, QHeaderView.ResizeMode.Stretch)
-        split.addWidget(self.table)
+        self.table.currentCellChanged.connect(
+            lambda row, *_: self._show_preview(row))
+
+        top = QSplitter(Qt.Orientation.Horizontal)
+        top.addWidget(self.table)
+        top.addWidget(side_w)
+        top.setSizes([720, 280])
+        split.addWidget(top)
 
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
@@ -153,6 +203,7 @@ class AdminConsole(QMainWindow):
         split.addWidget(self.log)
         split.setSizes([460, 240])
         root.addWidget(split, 1)
+        self._install_shortcuts()
 
     # ── Process plumbing ────────────────────────────────────────────────
 
@@ -184,12 +235,70 @@ class AdminConsole(QMainWindow):
         self._proc = proc
         proc.start(sys.executable, argv)
 
+    # ── One-at-a-time review ────────────────────────────────────────────
+
+    def _show_preview(self, row: int) -> None:
+        """Render the selected crop large, at its own pixels.
+
+        Nearest-neighbour on purpose: smoothing a 33x43 cell invents detail
+        that is not in the crop, and the decision is exactly whether there is
+        detail in it.
+        """
+        if row < 0 or row >= len(getattr(self, '_rows', [])):
+            return
+        r = self._rows[row]
+        img = self._images.get(row)
+        if img is None:
+            self.preview.setText('crop unavailable')
+        else:
+            h, w = img.shape[:2]
+            scale = max(1, int(_PREVIEW_PX / max(h, w)))
+            big = cv2.resize(img, (w * scale, h * scale),
+                             interpolation=cv2.INTER_NEAREST)
+            self.preview.setPixmap(_bgr_to_pixmap(big))
+        self.preview_info.setText(
+            f'<b>{r["label"]}</b><br>slot: {r["slot"]}<br>'
+            f'flagged as: {r.get("why", "—")}<br>'
+            f'{row + 1} of {len(self._rows)}')
+
+    def _decide(self, verb: str) -> None:
+        """Set the decision on the selected row and move to the next."""
+        row = self.table.currentRow()
+        if row < 0:
+            return
+        combo = self.table.cellWidget(row, COL_DECISION)
+        if combo is not None:
+            combo.setCurrentText(verb)
+        if row + 1 < self.table.rowCount():
+            self.table.setCurrentCell(row + 1, COL_SHA)
+
+    def _focus_relabel(self) -> None:
+        row = self.table.currentRow()
+        if row < 0:
+            return
+        combo = self.table.cellWidget(row, COL_DECISION)
+        if combo is not None:
+            combo.setCurrentText('RELABEL')
+        picker = self.table.cellWidget(row, COL_RELABEL)
+        if picker is not None:
+            picker.setFocus()
+
+    def _install_shortcuts(self) -> None:
+        for key, fn in (('K', lambda: self._decide('KEEP')),
+                        ('R', lambda: self._decide('REJECT')),
+                        ('L', self._focus_relabel)):
+            act = QAction(self)
+            act.setShortcut(QKeySequence(key))
+            act.triggered.connect(fn)
+            self.addAction(act)
+
     # ── Actions ─────────────────────────────────────────────────────────
 
     def on_scan(self) -> None:
         self.status.setText('Scanning… (fetching crop pixels, ~1–3 min)')
         # Scan is the default (dry-run) mode — there is no --scan flag.
         self._run(['admin_reject_crops.py',
+                   '--direction', self.cmb_direction.currentText(),
                    '--decisions', str(self._decisions_path),
                    '--montage', str(REPO_DIR / DEFAULT_MONTAGE)],
                   on_done=self._load_after_scan)
@@ -204,9 +313,12 @@ class AdminConsole(QMainWindow):
 
     def _populate(self, rows: list[dict]) -> None:
         self.table.setRowCount(len(rows))
+        self._rows = rows
+        self._images = {}
         for i, r in enumerate(rows):
             thumb = QTableWidgetItem()
             img = _fetch_crop(r['sha'], HF_TOKEN, local_dir=self._local_crops)
+            self._images[i] = img
             if img is not None:
                 thumb.setData(Qt.ItemDataRole.DecorationRole, _bgr_to_pixmap(img))
             thumb.setFlags(Qt.ItemFlag.ItemIsEnabled)
@@ -215,6 +327,11 @@ class AdminConsole(QMainWindow):
             self.table.setItem(i, COL_SHA, QTableWidgetItem(r['sha'][:12]))
             self.table.setItem(i, COL_LABEL, QTableWidgetItem(r['label']))
             self.table.setItem(i, COL_SLOT, QTableWidgetItem(r['slot']))
+            # Which contradiction flagged this crop. Worth seeing while
+            # deciding: a colourful crop under `__empty__` usually wants
+            # RELABEL to the item, a blank cell under an item's name usually
+            # wants RELABEL to `__empty__` / `__inactive__`.
+            self.table.setItem(i, COL_WHY, QTableWidgetItem(r.get('why', '')))
             self.table.setItem(
                 i, COL_STATS,
                 QTableWidgetItem(f'{float(r["bright"]):.0%} / {float(r["rich"]):.0%}'))
@@ -228,6 +345,9 @@ class AdminConsole(QMainWindow):
         self.table.resizeColumnsToContents()
         self.table.horizontalHeader().setSectionResizeMode(
             COL_RELABEL, QHeaderView.ResizeMode.Stretch)
+        if rows:
+            self.table.setCurrentCell(0, COL_SHA)
+            self._show_preview(0)
 
     def _make_relabel_picker(self, current: str) -> QComboBox:
         """Editable combo restricted to the cargo list, with type-to-filter

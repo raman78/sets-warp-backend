@@ -85,6 +85,11 @@ DATA_CRP = 'data/crops'
 LEDGER   = 'data/reviewed_virtual.jsonl'
 
 VIRTUAL_LABELS = frozenset({'__empty__', '__inactive__'})
+# Text crops (the ship name / class / tier bands) are wide low-contrast
+# strips, not slot cells — the blank-cell judgement does not apply to
+# them. Mirrors `_TEXT_CROP_PREFIXES` in main.py.
+_TEXT_CROP_SLOT_PREFIXES = ('ship_type', 'ship_tier', 'Ship Type',
+                            'Ship Tier', 'Ship Name')
 
 # KEEP IN SYNC with sto-warp icon_matcher._virtual_crop_looks_real /
 # warp.tools.scrub_training_data. A virtual-labeled crop with BOTH more than
@@ -116,6 +121,43 @@ def _bright_rich(bgr: np.ndarray) -> tuple[float, float]:
 def _looks_real(bgr: np.ndarray) -> bool:
     bright, rich = _bright_rich(bgr)
     return bright > VIRTUAL_SEED_BRIGHT_RATIO and rich > VIRTUAL_SEED_RICH_RATIO
+
+
+def _looks_blank(bgr: np.ndarray) -> bool:
+    """The mirror case: a crop under a real item's name that is an empty or
+    inactive cell.
+
+    More damaging than a colourful virtual, because it teaches the gallery
+    that the item *is* what nothing looks like, and the recogniser then
+    answers with that item on every blank cell. Measured 2026-09-03 on the
+    published mirror: 25 of 9227 real-named crops are blank, and 20 of them
+    carry one name — `Charged Particle Burst`, 20 of the 29 crops that class
+    has. An inactive BOFF cell sits at cosine 0.92 from those 20 and 0.45
+    from the 9 genuine ones.
+
+    Delegated to sto-warp's `_real_crop_looks_blank` for the same reason
+    `load_canonical_names` delegates: one definition, so this tool flags
+    exactly what the client refuses to seed. Without sto-warp available the
+    check is off rather than approximated.
+    """
+    fn = _load_blank_check()
+    return bool(fn(bgr)) if fn else False
+
+
+def _load_blank_check():
+    try:
+        from warp.recognition.icon_matcher import _real_crop_looks_blank
+        return _real_crop_looks_blank
+    except Exception:
+        if (_STO_WARP_SIBLING / 'warp' / 'recognition' / 'icon_matcher.py').exists():
+            sys.path.insert(0, str(_STO_WARP_SIBLING))
+        try:
+            from warp.recognition.icon_matcher import _real_crop_looks_blank
+            return _real_crop_looks_blank
+        except Exception as e:
+            print(f'WARNING: sto-warp unavailable ({e}) — the blank-cell '
+                  f'direction is skipped.', file=sys.stderr)
+            return None
 
 
 # ── Dataset readers ─────────────────────────────────────────────────────────────
@@ -225,8 +267,20 @@ def scan(snap_dir: Path,
          token: str,
          bright_ratio: float,
          rich_ratio: float,
-         show_reviewed: bool) -> list[dict]:
-    """Return colourful virtual-label crops in data/ that need review.
+         show_reviewed: bool,
+         direction: str = 'both') -> list[dict]:
+    """Return crops in data/ whose pixels contradict their label.
+
+    Two directions, both reviewed through the same ledger, montage and TSV:
+
+      virtual  a colourful crop labelled `__empty__` / `__inactive__`
+      real     a blank cell labelled with an item's name — the mirror, and
+               the one that goes on to name every empty slot after that item
+
+    `direction` selects one or both. The mirror direction has to read every
+    real-named crop in the dataset, so without sto-warp's local community
+    mirror it means thousands of downloads; the caller is warned rather than
+    surprised.
 
     Reads annotations from the shallow clone (plain text) to find every
     __empty__/__inactive__ sha, then fetches only those crop PNGs via
@@ -279,12 +333,66 @@ def scan(snap_dir: Path,
             'slot':   rec.get('slot', ''),
             'bright': bright,
             'rich':   rich,
+            'why':    'colourful-virtual',
             'img':    img,
             'prior':  (prior or {}).get('decision', '') if prior else '',
         })
     if missing:
         print(f'  WARN: {missing} virtual crop(s) could not be fetched/decoded.')
     out.sort(key=lambda e: e['rich'], reverse=True)
+
+    if direction in ('real', 'both'):
+        out += _scan_blank_under_real_name(
+            data, ledger, token, local_dir, show_reviewed)
+    return out
+
+
+def _scan_blank_under_real_name(data: dict[str, dict],
+                                ledger: dict[str, dict],
+                                token: str,
+                                local_dir,
+                                show_reviewed: bool) -> list[dict]:
+    """Crops carrying a real item's name whose pixels read as a blank cell."""
+    check = _load_blank_check()
+    if check is None:
+        return []
+    real = [(sha, rec) for sha, rec in data.items()
+            if (rec.get('name') or '').strip()
+            and (rec.get('name') or '').strip() not in VIRTUAL_LABELS
+            and not any((rec.get('slot') or '').startswith(p)
+                        for p in _TEXT_CROP_SLOT_PREFIXES)]
+    if not local_dir:
+        print(f'  NOTE: no local crop mirror — the blank-cell direction would '
+              f'download {len(real)} crops. Skipping; run this on a machine '
+              f'with the sto-warp community mirror.')
+        return []
+    print(f'Real-name crops in data/: {len(real)} — checking for blank cells…')
+
+    out: list[dict] = []
+    for i, (sha, rec) in enumerate(real, 1):
+        if i % 2000 == 0:
+            print(f'  … {i}/{len(real)}')
+        name = (rec.get('name') or '').strip()
+        prior = ledger.get(sha)
+        if (prior and prior.get('decision') == 'KEEP'
+                and (prior.get('name') or '') == name and not show_reviewed):
+            continue
+        img = _fetch_crop(sha, token, local_dir=local_dir)
+        if img is None or not check(img):
+            continue
+        bright, rich = _bright_rich(img)
+        out.append({
+            'sha':    sha,
+            'name':   name,
+            'slot':   rec.get('slot', ''),
+            'bright': bright,
+            'rich':   rich,
+            'why':    'blank-real',
+            'img':    img,
+            'prior':  (prior or {}).get('decision', '') if prior else '',
+        })
+    out.sort(key=lambda e: (e['name'], e['sha']))
+    print(f'  blank cells under a real name: {len(out)}')
     return out
 
 
@@ -303,7 +411,8 @@ def write_montage(candidates: list[dict], out_path: Path) -> None:
         x = c * (cell + 8) + 4
         thumb = cv2.resize(e['img'], (cell, cell), interpolation=cv2.INTER_NEAREST)
         canvas[y:y + cell, x:x + cell] = thumb
-        tag = f'{i + 1} {e["sha"][:6]}'
+        mark = 'B' if e.get('why') == 'blank-real' else ''
+        tag = f'{i + 1}{mark} {e["sha"][:6]}'
         cv2.putText(canvas, tag, (x, y - 6),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 255, 255), 1, cv2.LINE_AA)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -313,12 +422,14 @@ def write_montage(candidates: list[dict], out_path: Path) -> None:
 def write_decisions_tsv(candidates: list[dict], out_path: Path) -> None:
     """Pre-fill a REJECT decision per crop. The maintainer edits the first
     column to KEEP or 'RELABEL <name>' before --apply."""
-    lines = ['# decision\tidx\tsha\tlabel\tslot\tbright\trich',
-             '# decision ∈ {REJECT, KEEP, RELABEL <canonical name>}']
+    lines = ['# decision\tidx\tsha\tlabel\tslot\tbright\trich\twhy',
+             '# decision ∈ {REJECT, KEEP, RELABEL <canonical name>}',
+             '# why = colourful-virtual (a real icon filed as empty) '
+             '| blank-real (an empty cell filed as an item)']
     for i, e in enumerate(candidates, 1):
         lines.append(
             f'REJECT\t{i}\t{e["sha"]}\t{e["name"]}\t{e["slot"]}\t'
-            f'{e["bright"]:.3f}\t{e["rich"]:.3f}'
+            f'{e["bright"]:.3f}\t{e["rich"]:.3f}\t{e.get("why", "")}'
         )
     out_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
@@ -471,6 +582,11 @@ def main() -> int:
                     help='Colour-rich fraction gate (keep in sync with client).')
     ap.add_argument('--show-reviewed', action='store_true',
                     help='Include crops already decided in the ledger.')
+    ap.add_argument('--direction', choices=('virtual', 'real', 'both'),
+                    default='both',
+                    help="Which contradiction to look for: 'virtual' = a "
+                         "colourful crop labelled empty/inactive, 'real' = a "
+                         "blank cell labelled with an item name (default: both).")
     args = ap.parse_args()
 
     _require_hf()
@@ -513,13 +629,18 @@ def main() -> int:
 
     # Scan (dry-run)
     candidates = scan(snap_dir, HF_TOKEN, args.bright_ratio, args.rich_ratio,
-                      show_reviewed=args.show_reviewed)
-    print(f'\nFlagged {len(candidates)} colourful virtual crop(s) needing review:')
+                      show_reviewed=args.show_reviewed,
+                      direction=args.direction)
+    n_virt = sum(1 for e in candidates if e.get('why') != 'blank-real')
+    n_blank = len(candidates) - n_virt
+    print(f'\nFlagged {len(candidates)} crop(s) needing review — '
+          f'{n_virt} colourful under a virtual label, '
+          f'{n_blank} blank under an item name:')
     for i, e in enumerate(candidates, 1):
         prior = f'  (ledger: {e["prior"]})' if e['prior'] else ''
-        print(f'  [{i:>2}] {e["sha"][:10]}  {e["name"]:<12} '
-              f'slot={e["slot"]!r:<18} bright={e["bright"]:.1%} '
-              f'rich={e["rich"]:.1%}{prior}')
+        print(f'  [{i:>2}] {e["sha"][:10]}  {e["name"]:<34.34} '
+              f'slot={e["slot"]!r:<18} why={e.get("why", ""):<17} '
+              f'bright={e["bright"]:.1%} rich={e["rich"]:.1%}{prior}')
 
     if not candidates:
         print('Nothing to review — data/ is clean of colourful virtual crops.')
