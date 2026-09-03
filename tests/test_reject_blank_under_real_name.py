@@ -105,3 +105,117 @@ def test_a_kept_crop_is_not_re_surfaced(mirror):
     data, crops = mirror
     ledger = {'a' * 8: {'decision': 'KEEP', 'name': 'Charged Particle Burst'}}
     assert _scan(data, crops, ledger) == []
+
+
+# ── The tail: the least-corroborated entries ───────────────────────────────
+
+def _entry(sha, name, votes, losers=None, slot='Deflector'):
+    rec = {'crop_sha256': sha, 'name': name, 'slot': slot, 'votes': votes}
+    if losers:
+        rec['losers'] = losers
+    return rec
+
+
+@pytest.fixture
+def dataset(tmp_path):
+    """A crop mirror plus entries with differing vote counts."""
+    crops = tmp_path / 'crops'
+    crops.mkdir()
+    data = {}
+    for sha, votes in (('a' * 8, 7), ('b' * 8, 1), ('c' * 8, 3)):
+        cv2.imwrite(str(crops / f'{sha}.png'), _real_icon())
+        data[sha] = _entry(sha, f'Item {sha[0]}', votes)
+    return data, crops
+
+
+def test_the_weakest_entries_come_first(dataset):
+    data, crops = dataset
+
+    out = tool._scan_weakest(data, {}, '', crops, False, limit=3)
+
+    assert [e['votes'] for e in out] == [1, 3, 7]
+
+
+def test_the_limit_is_respected(dataset):
+    data, crops = dataset
+
+    assert len(tool._scan_weakest(data, {}, '', crops, False, limit=2)) == 2
+
+
+def test_a_superseded_verdict_is_shown_alongside(dataset):
+    """An entry that overturned a stronger one is not just another single
+    vote, and the reviewer has to be able to see that."""
+    data, crops = dataset
+    data['b' * 8] = _entry('b' * 8, 'Item b', 1, losers={'Item was': 5})
+
+    out = tool._scan_weakest(data, {}, '', crops, False, limit=1)
+
+    assert 'Item was' in out[0]['why']
+
+
+def test_a_virtual_label_is_not_in_the_tail(dataset):
+    """Empty and inactive slots are reviewed by the other two directions;
+    a lone vote on one is normal and not evidence of anything."""
+    data, crops = dataset
+    cv2.imwrite(str(crops / f'{"d" * 8}.png'), _inactive_cell())
+    data['d' * 8] = _entry('d' * 8, '__inactive__', 1)
+
+    out = tool._scan_weakest(data, {}, '', crops, False, limit=10)
+
+    assert all(e['name'] != '__inactive__' for e in out)
+
+
+def test_a_kept_entry_is_not_re_surfaced(dataset):
+    data, crops = dataset
+    ledger = {'b' * 8: {'decision': 'KEEP', 'name': 'Item b'}}
+
+    out = tool._scan_weakest(data, ledger, '', crops, False, limit=10)
+
+    assert all(e['sha'] != 'b' * 8 for e in out)
+
+
+def test_an_entry_that_overturned_a_stronger_one_ranks_first(dataset, monkeypatch):
+    """A lone vote is normal. A lone vote that replaced five is the one case
+    where it is doing damage if it is wrong."""
+    data, crops = dataset
+    monkeypatch.setattr(tool, 'load_canonical_names',
+                        lambda: {f'Item {c}' for c in 'abc'})
+    data['c' * 8] = _entry('c' * 8, 'Item c', 1, losers={'Item was': 5})
+
+    out = tool._scan_weakest(data, {}, '', crops, False, limit=3)
+
+    assert out[0]['sha'] == 'c' * 8
+    assert 'overturned-stronger' in out[0]['why']
+
+
+def test_a_name_cargo_does_not_know_is_flagged(dataset, monkeypatch):
+    data, crops = dataset
+    monkeypatch.setattr(tool, 'load_canonical_names', lambda: {'Item a', 'Item c'})
+
+    out = tool._scan_weakest(data, {}, '', crops, False, limit=3)
+
+    assert 'name-not-in-cargo' in out[0]['why']
+    assert out[0]['name'] == 'Item b'
+
+
+def test_a_placeholder_slot_is_flagged(dataset, monkeypatch):
+    """Over half of one production sample carried `slot='migrated'` — a
+    leftover from an old import rather than a slot the game has."""
+    data, crops = dataset
+    monkeypatch.setattr(tool, 'load_canonical_names',
+                        lambda: {f'Item {c}' for c in 'abc'})
+    data['a' * 8] = _entry('a' * 8, 'Item a', 7, slot='migrated')
+
+    out = tool._scan_weakest(data, {}, '', crops, False, limit=3)
+
+    assert 'no-real-slot' in out[0]['why']
+
+
+def test_an_unremarkable_entry_carries_no_flag(dataset, monkeypatch):
+    data, crops = dataset
+    monkeypatch.setattr(tool, 'load_canonical_names',
+                        lambda: {f'Item {c}' for c in 'abc'})
+
+    out = tool._scan_weakest(data, {}, '', crops, False, limit=3)
+
+    assert out[-1]['why'].startswith('votes=')

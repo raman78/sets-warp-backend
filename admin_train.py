@@ -823,19 +823,33 @@ def train(winner_labels: dict[str, str],
     # `data/crops`. One operation, no per-file throttling, and it either
     # succeeds or fails loudly.
     import subprocess as _sp
+    from hf_clone import _redact
     _crops_root = snap_cache / 'data' / 'crops'
     _clone_dir  = tmpdir / 'crops_repo'
     _clone_url  = f'https://huggingface.co/datasets/{HF_DATASET}'
-    if HF_TOKEN:
-        _clone_url = _clone_url.replace('https://', f'https://user:{HF_TOKEN}@')
+    # The token goes in a header, never in the URL or in `.git/config`, and
+    # any failure is re-raised without it: `CalledProcessError` prints the
+    # whole command line, and these tools run in a maintainer's terminal as
+    # well as on CI.
+    _auth = [] if not HF_TOKEN else [
+        '-c', f'http.extraHeader=Authorization: Bearer {HF_TOKEN}']
+
+    def _git(*args, cwd=None):
+        try:
+            _sp.run(['git', *args], check=True,
+                    cwd=str(cwd) if cwd else None)
+        except _sp.CalledProcessError as exc:
+            raise _sp.CalledProcessError(
+                exc.returncode, [_redact(a, HF_TOKEN) for a in exc.cmd],
+                output=exc.output, stderr=exc.stderr) from None
+
     print('Cloning data/crops over git (the REST path is rate-limited)...')
     _sp.run(['git', 'lfs', 'install'], check=True,
             stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
-    _sp.run(['git', 'clone', '--no-checkout', '--depth', '1',
-             _clone_url, str(_clone_dir)], check=True)
-    _sp.run(['git', 'sparse-checkout', 'set', 'data/crops'],
-            cwd=_clone_dir, check=True)
-    _sp.run(['git', 'checkout'], cwd=_clone_dir, check=True)
+    _git(*_auth, 'clone', '--no-checkout', '--depth', '1',
+         _clone_url, str(_clone_dir))
+    _git('sparse-checkout', 'set', 'data/crops', cwd=_clone_dir)
+    _git(*_auth, 'checkout', cwd=_clone_dir)
 
     # Flatten both layouts into the cache the trainer reads: `data/crops/` is
     # part sharded (`<ab>/<sha>.png`, HF caps a directory at 10 000 files)

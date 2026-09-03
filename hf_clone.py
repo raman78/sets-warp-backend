@@ -14,8 +14,14 @@ Why not snapshot_download?
 Token handling:
     The token is passed via `-c http.extraHeader=Authorization: Bearer …`
     so it never lands in `.git/config` (no plain-text token on disk).
-    Argv exposure is irrelevant on ephemeral CI runners; GitHub Actions
-    masks the secret in logs.
+
+    It is still in argv, and that is not harmless: these tools are run
+    locally by the maintainer as well as on CI, and `CalledProcessError`
+    prints the whole command line. A failed clone put a live token into a
+    terminal transcript on 2026-09-03. Every failure from here is re-raised
+    with the token replaced, so the value cannot travel in an error message.
+    GitHub masks its own secrets in Actions logs; nothing masks a local
+    shell.
 
 LFS:
     GIT_LFS_SKIP_SMUDGE=1 is forced — LFS pointer files are kept, blobs
@@ -35,6 +41,11 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+
+def _redact(text: str, token: str) -> str:
+    """Replace a token wherever it appears in a string."""
+    return text.replace(token, '***') if token and isinstance(text, str) else text
 
 
 def clone_hf_shallow(
@@ -78,8 +89,16 @@ def clone_hf_shallow(
     }
 
     def _git(args: list[str], cwd: Path | None = None) -> None:
-        subprocess.run(['git', *args], check=True, env=env,
-                       cwd=str(cwd) if cwd else None)
+        try:
+            subprocess.run(['git', *args], check=True, env=env,
+                           cwd=str(cwd) if cwd else None)
+        except subprocess.CalledProcessError as exc:
+            # The token is in argv, and the default message prints argv.
+            raise subprocess.CalledProcessError(
+                exc.returncode,
+                [_redact(a, token) for a in exc.cmd],
+                output=exc.output, stderr=exc.stderr,
+            ) from None
 
     # HF rate-limits shared CI IPs (429) even with a valid token. git surfaces
     # that as a non-zero exit, so retry the network step with exponential

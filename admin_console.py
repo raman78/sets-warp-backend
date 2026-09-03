@@ -38,6 +38,7 @@ from PySide6.QtCore import Qt, QProcess
 from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QCompleter, QHBoxLayout, QHeaderView, QLabel,
+    QSpinBox,
     QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSplitter,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
@@ -129,11 +130,13 @@ class AdminConsole(QMainWindow):
         # ── Action bar ──────────────────────────────────────────────────
         bar = QHBoxLayout()
         self.cmb_direction = QComboBox()
-        self.cmb_direction.addItems(['both', 'virtual', 'real'])
+        self.cmb_direction.addItems(['both', 'virtual', 'real', 'tail'])
         self.cmb_direction.setToolTip(
             'virtual — a colourful crop labelled __empty__/__inactive__\n'
             'real    — a blank cell labelled with an item name\n'
-            'both    — one review pass over the two')
+            'both    — one review pass over the two\n'
+            'tail    — the least-corroborated entries, weakest first;\n'
+            '          most are fine, but junk collects here')
         self.btn_scan   = QPushButton('Scan mislabelled crops')
         self.btn_apply  = QPushButton('Apply decisions')
         self.btn_merge  = QPushButton('Merge (dry-run)')
@@ -146,6 +149,13 @@ class AdminConsole(QMainWindow):
             lambda: self._run(['admin_audit_staging.py']))
         bar.addWidget(QLabel('direction:'))
         bar.addWidget(self.cmb_direction)
+        self.spin_tail = QSpinBox()
+        self.spin_tail.setRange(10, 5000)
+        self.spin_tail.setValue(200)
+        self.spin_tail.setSingleStep(50)
+        self.spin_tail.setToolTip('How many of the weakest entries the '
+                                  'tail direction surfaces')
+        bar.addWidget(self.spin_tail)
         for b in (self.btn_scan, self.btn_apply, self.btn_merge, self.btn_audit):
             bar.addWidget(b)
         bar.addStretch(1)
@@ -299,6 +309,7 @@ class AdminConsole(QMainWindow):
         # Scan is the default (dry-run) mode — there is no --scan flag.
         self._run(['admin_reject_crops.py',
                    '--direction', self.cmb_direction.currentText(),
+                   '--tail', str(self.spin_tail.value()),
                    '--decisions', str(self._decisions_path),
                    '--montage', str(REPO_DIR / DEFAULT_MONTAGE)],
                   on_done=self._load_after_scan)

@@ -287,12 +287,90 @@ def _fetch_crop(sha: str, token: str,
     return None
 
 
+
+def _scan_weakest(data: dict[str, dict],
+                  ledger: dict[str, dict],
+                  token: str,
+                  local_dir,
+                  show_reviewed: bool,
+                  limit: int) -> list[dict]:
+    """The least-corroborated entries in `data/`, weakest first.
+
+    The other two directions look for a crop whose pixels contradict its
+    label. This one looks at nothing but the vote count, because since the
+    merge became a queue every entry lands on first sighting and carries its
+    own strength: a lone vote is enough to enter `data/` and is recorded as
+    exactly that. Most are perfectly good — an item only one person has ever
+    confirmed is still an item — but if junk is anywhere, it is here.
+
+    A superseded verdict is shown alongside, so an entry that overturned a
+    stronger one is visible as such rather than looking like any other single
+    vote.
+    """
+    # Ranking by vote count alone is useless here: since the merge became a
+    # queue almost everything enters on one vote, so the "weakest 200" would
+    # be an alphabetical slice of thousands of identical scores. What makes a
+    # single vote worth a look is the company it keeps.
+    canon = load_canonical_names()
+    scored = []
+    for sha, rec in data.items():
+        name = (rec.get('name') or '').strip()
+        if not name or name in VIRTUAL_LABELS:
+            continue
+        prior = ledger.get(sha)
+        if (prior and prior.get('decision') == 'KEEP'
+                and (prior.get('name') or '') == name and not show_reviewed):
+            continue
+        votes  = int(rec.get('votes') or 0)
+        losers = rec.get('losers') or {}
+        flags  = []
+        # Overturned something better corroborated than itself: the one case
+        # where a lone vote is doing real damage if it is wrong.
+        if any(int(v or 0) > votes for v in losers.values()):
+            flags.append('overturned-stronger')
+        # A name nothing downstream can resolve. The models learn it, the
+        # exporter cannot write it, and no user typed it on purpose.
+        if canon and name not in canon:
+            flags.append('name-not-in-cargo')
+        # A placeholder slot from an old migration rather than a real one.
+        if (rec.get('slot') or '').strip() in ('', 'migrated'):
+            flags.append('no-real-slot')
+        scored.append((-len(flags), votes, sha, rec, prior, flags))
+    scored.sort(key=lambda t: (t[0], t[1], t[2]))
+    scored = scored[:limit]
+    n_flagged = sum(1 for t in scored if t[5])
+    print(f'Weakest {len(scored)} of {len(data)} entries '
+          f'({n_flagged} with something against them) — reading pixels…')
+
+    out: list[dict] = []
+    for _rank, votes, sha, rec, prior, flags in scored:
+        img = _fetch_crop(sha, token, local_dir=local_dir)
+        if img is None:
+            continue
+        bright, rich = _bright_rich(img)
+        losers = rec.get('losers') or {}
+        out.append({
+            'sha':    sha,
+            'name':   (rec.get('name') or '').strip(),
+            'slot':   rec.get('slot', ''),
+            'bright': bright,
+            'rich':   rich,
+            'why':    (', '.join(flags) if flags else f'votes={votes}')
+                      + (f' (over {", ".join(losers)})' if losers else ''),
+            'votes':  votes,
+            'img':    img,
+            'prior':  (prior or {}).get('decision', ''),
+        })
+    return out
+
+
 def scan(snap_dir: Path,
          token: str,
          bright_ratio: float,
          rich_ratio: float,
          show_reviewed: bool,
-         direction: str = 'both') -> list[dict]:
+         direction: str = 'both',
+         tail: int = 200) -> list[dict]:
     """Return crops in data/ whose pixels contradict their label.
 
     Two directions, both reviewed through the same ledger, montage and TSV:
@@ -318,6 +396,12 @@ def scan(snap_dir: Path,
 
     data = _load_jsonl_by_sha(snap_dir / DATA_ANN)
     ledger = _load_ledger(snap_dir)
+
+    if direction == 'tail':
+        # Nothing to do with pixel/label contradictions — this one ranks the
+        # whole dataset by how well corroborated each entry is.
+        return _scan_weakest(data, ledger, token, local_mirror_crops_dir(),
+                             show_reviewed, tail)
 
     virtual = [(sha, rec) for sha, rec in data.items()
                if (rec.get('name') or '').strip() in VIRTUAL_LABELS]
@@ -607,11 +691,17 @@ def main() -> int:
                     help='Colour-rich fraction gate (keep in sync with client).')
     ap.add_argument('--show-reviewed', action='store_true',
                     help='Include crops already decided in the ledger.')
-    ap.add_argument('--direction', choices=('virtual', 'real', 'both'),
+    ap.add_argument('--direction',
+                    choices=('virtual', 'real', 'both', 'tail'),
                     default='both',
-                    help="Which contradiction to look for: 'virtual' = a "
-                         "colourful crop labelled empty/inactive, 'real' = a "
-                         "blank cell labelled with an item name (default: both).")
+                    help="What to surface: 'virtual' = a colourful crop "
+                         "labelled empty/inactive, 'real' = a blank cell "
+                         "labelled with an item name, 'both' = the two "
+                         "contradictions (default), 'tail' = the entries "
+                         "with the fewest votes behind them, weakest first.")
+    ap.add_argument('--tail', type=int, default=200, metavar='N',
+                    help='How many of the weakest entries --direction tail '
+                         'surfaces (default 200).')
     args = ap.parse_args()
 
     _require_hf()
@@ -655,17 +745,24 @@ def main() -> int:
     # Scan (dry-run)
     candidates = scan(snap_dir, HF_TOKEN, args.bright_ratio, args.rich_ratio,
                       show_reviewed=args.show_reviewed,
-                      direction=args.direction)
-    n_virt = sum(1 for e in candidates if e.get('why') != 'blank-real')
-    n_blank = len(candidates) - n_virt
-    print(f'\nFlagged {len(candidates)} crop(s) needing review — '
-          f'{n_virt} colourful under a virtual label, '
-          f'{n_blank} blank under an item name:')
+                      direction=args.direction, tail=args.tail)
+    if args.direction == 'tail':
+        print(f'\n{len(candidates)} least-corroborated entr(ies), weakest '
+              f'first — most will be fine; junk, if any, is here:')
+    else:
+        n_virt = sum(1 for e in candidates if e.get('why') != 'blank-real')
+        n_blank = len(candidates) - n_virt
+        print(f'\nFlagged {len(candidates)} crop(s) needing review — '
+              f'{n_virt} colourful under a virtual label, '
+              f'{n_blank} blank under an item name:')
     for i, e in enumerate(candidates, 1):
         prior = f'  (ledger: {e["prior"]})' if e['prior'] else ''
+        detail = (f'{e.get("why", "")}'
+                  if 'votes' in e
+                  else f'why={e.get("why", ""):<17} '
+                       f'bright={e["bright"]:.1%} rich={e["rich"]:.1%}')
         print(f'  [{i:>2}] {e["sha"][:10]}  {e["name"]:<34.34} '
-              f'slot={e["slot"]!r:<18} why={e.get("why", ""):<17} '
-              f'bright={e["bright"]:.1%} rich={e["rich"]:.1%}{prior}')
+              f'slot={e["slot"]!r:<18} {detail}{prior}')
 
     if not candidates:
         print('Nothing to review — data/ is clean of colourful virtual crops.')
