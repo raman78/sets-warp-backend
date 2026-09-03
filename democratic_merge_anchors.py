@@ -44,6 +44,8 @@ Environment variables (same as the other mergers):
 
 from __future__ import annotations
 
+from hf_commit import commit_adds_then_deletes
+
 import argparse
 import io
 import json
@@ -363,13 +365,13 @@ def _apply(
         return
 
     print(f'Committing: {len(promoted)} anchor groups + drain({drained} staging grids)…')
-    api.create_commit(
-        repo_id        = REPO,
-        repo_type      = RTYPE,
-        operations     = ops,
-        commit_message = (f'democratic_merge_anchors: {len(promoted)} groups '
-                          f'(drained {drained} staging grids) '
-                          f'@ {datetime.now(UTC).strftime("%Y-%m-%d %H:%M")} UTC'),
+    # Chunked, additions before deletions — see hf_commit for why one
+    # commit for everything is no longer safe at these volumes.
+    commit_adds_then_deletes(
+        api, REPO, RTYPE, ops,
+        (f'democratic_merge_anchors: {len(promoted)} groups '
+         f'(drained {drained} staging grids) '
+         f'@ {datetime.now(UTC).strftime("%Y-%m-%d %H:%M")} UTC'),
     )
 
 

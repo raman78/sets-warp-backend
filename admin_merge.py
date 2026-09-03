@@ -19,6 +19,8 @@ Environment variables (or .env file):
 
 from __future__ import annotations
 
+from hf_commit import commit_adds_then_deletes
+
 import argparse
 import json
 import os
@@ -294,14 +296,14 @@ def _hf_save_state(
             ops.append(CommitOperationDelete(path_in_repo=rel_png))
             deleted += 1
 
-        api.create_commit(
-            repo_id        = HF_REPO_ID,
-            repo_type      = 'dataset',
-            operations     = ops,
-            commit_message = (f'admin_merge: {len(knowledge)} entries, '
-                              f'{len(processed_ids)} tracked, '
-                              f'drained {deleted // 2} promoted contribs '
-                              f'({datetime.now(UTC).strftime("%Y-%m-%d %H:%M")} UTC)'),
+        # Chunked, additions before deletions — see hf_commit for why one
+        # commit for everything is no longer safe at these volumes.
+        commit_adds_then_deletes(
+            api, HF_REPO_ID, 'dataset', ops,
+            (f'admin_merge: {len(knowledge)} entries, '
+             f'{len(processed_ids)} tracked, '
+             f'drained {deleted // 2} promoted contribs '
+             f'({datetime.now(UTC).strftime("%Y-%m-%d %H:%M")} UTC)'),
         )
         return True
     except Exception as e:

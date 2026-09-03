@@ -331,6 +331,43 @@ def _print_row(row: dict):
     print(f'  {symbol} [{sha}] {winner!r:44s} {votes}/{total}{old}{losers}')
 
 
+# ── Commit safety ───────────────────────────────────────────────────────────
+
+from hf_commit import CHUNK as COMMIT_CHUNK, commit_chunked, validate_ops
+
+
+def _commit_in_stages(api, crop_ops: list, anno_op, drain_ops: list,
+                      summary: str, chunk: int = COMMIT_CHUNK) -> None:
+    """Apply the merge as an ordered sequence of commits.
+
+    The order is what keeps every intermediate state consistent:
+
+      1. crop PNGs       additive. A crop in `data/crops/` that no annotation
+                         references yet is inert, and the next run skips it
+                         as already present.
+      2. annotations     every path it references now exists.
+      3. staging drain   staging is only emptied once `data/` is
+                         authoritative, so an interrupted run leaves
+                         duplicates to re-promote, never a lost crop.
+
+    Stopping anywhere in that sequence is safe and the next scheduled run
+    converges: promotion is idempotent by sha. See `hf_commit` for why the
+    single atomic commit this replaced had to go.
+    """
+    problems = validate_ops(crop_ops + [anno_op] + drain_ops)
+    if problems:
+        for p in problems[:20]:
+            print(f'  MALFORMED: {p}')
+        raise SystemExit(
+            f'Refusing to commit: {len(problems)} malformed operation(s). '
+            f'Nothing was written.')
+
+    for ops, label in ((crop_ops, 'crops'), ([anno_op], 'annotations'),
+                       (drain_ops, 'drain')):
+        commit_chunked(api, REPO, RTYPE, ops, summary,
+                       chunk=chunk, label=label, validate=False)
+
+
 def _apply(
     api, token: str,
     merged:    dict[str, dict],
@@ -340,12 +377,15 @@ def _apply(
     repo_files: set[str],
     contributors_for_sha: dict[str, set[str]],
     staging_records: dict[str, list[dict]],
+    chunk: int = COMMIT_CHUNK,
 ):
-    """One commit: rewrite data/annotations.jsonl, copy approved crops, then
-    drain staging — delete staging crop PNGs for promoted sha and rewrite
-    each contributor's annotations.jsonl keeping only the not-promoted lines.
+    """Rewrite data/annotations.jsonl, copy approved crops, then drain
+    staging — delete staging crop PNGs for promoted sha and rewrite each
+    contributor's annotations.jsonl keeping only the not-promoted lines.
 
-    A single atomic commit so a half-applied state is impossible.
+    Applied as an ordered sequence of commits rather than one; see
+    `_commit_in_stages` for the order and why a half-applied state is still
+    safe.
     """
     from huggingface_hub import (
         CommitOperationAdd, CommitOperationDelete, hf_hub_download,
@@ -357,12 +397,15 @@ def _apply(
         lines.append(json.dumps(merged[sha], ensure_ascii=False))
     payload = ('\n'.join(lines) + '\n').encode('utf-8')
 
+    # Three groups, committed in this order — see `_commit_in_stages` for why.
     ops: list = [
         CommitOperationAdd(
             path_in_repo  = DATA_ANN,
             path_or_fileobj = io.BytesIO(payload),
         )
     ]
+    ops_crops: list = []
+    ops_drain: list = []
 
     # 2. Copy any approved crop that isn't already in data/crops/.
     missing: list[str] = []
@@ -382,7 +425,7 @@ def _apply(
             print(f'  ERR fetching {src}: {e}')
             missing.append(sha)
             continue
-        ops.append(CommitOperationAdd(
+        ops_crops.append(CommitOperationAdd(
             path_in_repo    = dst,
             path_or_fileobj = local,
         ))
@@ -405,7 +448,7 @@ def _apply(
         for iid in contributors_for_sha.get(sha, ()):
             staging_png = f'staging/{iid}/crops/{sha}.png'
             if staging_png in repo_files:
-                ops.append(CommitOperationDelete(path_in_repo=staging_png))
+                ops_drain.append(CommitOperationDelete(path_in_repo=staging_png))
                 deleted_crops += 1
 
     for iid, records in staging_records.items():
@@ -415,12 +458,12 @@ def _apply(
             continue
         staging_ann = f'staging/{iid}/annotations.jsonl'
         if not kept:
-            ops.append(CommitOperationDelete(path_in_repo=staging_ann))
+            ops_drain.append(CommitOperationDelete(path_in_repo=staging_ann))
             deleted_annos += 1
         else:
             buf = ('\n'.join(json.dumps(r, ensure_ascii=False) for r in kept)
                    + '\n').encode('utf-8')
-            ops.append(CommitOperationAdd(
+            ops_drain.append(CommitOperationAdd(
                 path_in_repo    = staging_ann,
                 path_or_fileobj = io.BytesIO(buf),
             ))
@@ -429,14 +472,17 @@ def _apply(
     print(f'Committing: 1 annotations file + {new_crops} new crops + '
           f'drain({deleted_crops} stg crops, {rewritten_annos} stg ann '
           f'trimmed, {deleted_annos} stg ann emptied)…')
-    api.create_commit(
-        repo_id        = REPO,
-        repo_type      = RTYPE,
-        operations     = ops,
-        commit_message = (f'democratic_merge: {len(merged)} entries '
-                          f'(+{new_crops} new crops, drained '
-                          f'{deleted_crops} staging crops) '
-                          f'@ {datetime.now(UTC).strftime("%Y-%m-%d %H:%M")} UTC'),
+
+    stamp = datetime.now(UTC).strftime('%Y-%m-%d %H:%M')
+    _commit_in_stages(
+        api,
+        crop_ops   = ops_crops,
+        anno_op    = ops[0],
+        drain_ops  = ops_drain,
+        summary    = (f'democratic_merge: {len(merged)} entries '
+                      f'(+{new_crops} new crops, drained '
+                      f'{deleted_crops} staging crops) @ {stamp} UTC'),
+        chunk      = chunk,
     )
 
 
@@ -449,6 +495,10 @@ def main() -> int:
                     help='HF write token (falls back to $HF_TOKEN / .env)')
     ap.add_argument('--apply',   action='store_true',
                     help='Commit to HF (default: dry-run)')
+    ap.add_argument('--chunk',   type=int, default=COMMIT_CHUNK, metavar='N',
+                    help=f'Operations per commit (default {COMMIT_CHUNK}). '
+                         f'One commit for everything is what broke; see '
+                         f'COMMIT_CHUNK.')
     ap.add_argument('--min',     type=int, default=2, metavar='N',
                     help='Minimum votes for existing sha (default: 2). '
                          'New sha always require only 1.')
@@ -538,7 +588,8 @@ def main() -> int:
         return 0
 
     _apply(api, args.token, merged, promoted_shas, existing, crop_src,
-           repo_files, contributors_for_sha, staging_records)
+           repo_files, contributors_for_sha, staging_records,
+           chunk=args.chunk)
     print('OK — committed.')
     return 0
 

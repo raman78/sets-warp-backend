@@ -38,6 +38,8 @@ Environment (.env, same as the mergers):
 
 from __future__ import annotations
 
+from hf_commit import commit_adds_then_deletes
+
 import argparse
 import json
 import os
@@ -282,11 +284,11 @@ def _commit_deletes(
         return
     print(f'  {repo_id}: committing {len(deletes)} deletes + '
           f'{len(rewrites)} rewrites…')
-    api.create_commit(
-        repo_id        = repo_id,
-        repo_type      = 'dataset',
-        operations     = ops,
-        commit_message = message,
+    # Chunked, additions before deletions — see hf_commit for why one
+    # commit for everything is no longer safe at these volumes.
+    commit_adds_then_deletes(
+        api, repo_id, 'dataset', ops,
+        message,
     )
 
 

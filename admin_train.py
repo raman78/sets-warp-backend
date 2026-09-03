@@ -203,14 +203,13 @@ def _create_commit_with_retry(api, repo_id: str, repo_type: str,
                               max_retries: int = 3) -> bool:
     """Call api.create_commit with retry on 429 rate-limit errors."""
     import re
+    from hf_commit import commit_chunked
     for attempt in range(max_retries):
         try:
-            api.create_commit(
-                repo_id=repo_id,
-                repo_type=repo_type,
-                operations=operations,
-                commit_message=commit_message,
-            )
+            # Chunked: one commit for an unbounded operation list is what
+            # froze the crop merge for seven weeks (see hf_commit).
+            commit_chunked(api, repo_id, repo_type, operations,
+                           commit_message)
             return True
         except Exception as e:
             msg = str(e)
