@@ -809,42 +809,57 @@ def train(winner_labels: dict[str, str],
     _opener = _urllib.build_opener()
     _opener.addheaders = _auth_headers
 
-    # One listing, then one request per crop. `data/crops/` is part sharded
-    # (`<ab>/<sha>.png`, because HF caps a directory at 10 000 files) and part
-    # flat, from before the shards. Guessing both paths per crop doubled the
-    # request count against 12 274 crops and lost 7 903 of them in a single
-    # run — the model then trained on a third of the dataset and nobody could
-    # see why, because the failure was swallowed. The listing costs one call
-    # and removes the guess.
-    from huggingface_hub import HfApi as _HfApi
-    _crop_paths = {
-        Path(p).stem: p
-        for p in _HfApi(token=HF_TOKEN or None).list_repo_files(
-            HF_DATASET, repo_type='dataset')
-        if p.startswith('data/crops/') and p.endswith('.png')
-    }
+    # One git clone, not 12 274 HTTP requests.
+    #
+    # The REST path is rate-limited: fetching the crops one by one drew
+    # `HTTP 429 Too Many Requests` and the run finished with 4 520 of 12 274
+    # crops, so the embedder trained on a third of the dataset and published
+    # — 1 637 classes against 2 867. The client hit the same wall on cold
+    # start (`_MAX_DOWNLOAD_WORKERS = 3`, "HF rate-limits anonymous parallel
+    # HEADs"), and `tools/build_crops_tarball.py` in sto-warp already fetches
+    # exactly this data over the git protocol for exactly this reason.
+    #
+    # `git lfs` pulls the pixels; a shallow sparse checkout keeps it to
+    # `data/crops`. One operation, no per-file throttling, and it either
+    # succeeds or fails loudly.
+    import subprocess as _sp
+    _crops_root = snap_cache / 'data' / 'crops'
+    _clone_dir  = tmpdir / 'crops_repo'
+    _clone_url  = f'https://huggingface.co/datasets/{HF_DATASET}'
+    if HF_TOKEN:
+        _clone_url = _clone_url.replace('https://', f'https://user:{HF_TOKEN}@')
+    print('Cloning data/crops over git (the REST path is rate-limited)...')
+    _sp.run(['git', 'lfs', 'install'], check=True,
+            stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+    _sp.run(['git', 'clone', '--no-checkout', '--depth', '1',
+             _clone_url, str(_clone_dir)], check=True)
+    _sp.run(['git', 'sparse-checkout', 'set', 'data/crops'],
+            cwd=_clone_dir, check=True)
+    _sp.run(['git', 'checkout'], cwd=_clone_dir, check=True)
+
+    # Flatten both layouts into the cache the trainer reads: `data/crops/` is
+    # part sharded (`<ab>/<sha>.png`, HF caps a directory at 10 000 files)
+    # and part flat, from before the shards.
+    _crops_root.mkdir(parents=True, exist_ok=True)
+    _cloned = 0
+    for _png in (_clone_dir / 'data' / 'crops').rglob('*.png'):
+        _dst = _crops_root / _png.name
+        if not _dst.exists():
+            _dst.write_bytes(_png.read_bytes())
+        _cloned += 1
+    print(f'  {_cloned} crop(s) checked out.')
     _first_errors: list[str] = []
 
     def _fetch_crop(sha: str) -> bool:
         dest = snap_cache / 'data' / 'crops' / f'{sha}.png'
         if dest.exists():
             return True
-        rel = _crop_paths.get(sha)
-        if rel is None:
-            if len(_first_errors) < 5:
-                _first_errors.append(f'{sha[:12]}: not in data/crops/')
-            return False
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with _opener.open(f'{_hf_base}/{rel}') as r:
-                dest.write_bytes(r.read())
-            return True
-        except Exception as e:
-            # Never silent: a run that loses crops has to say what went wrong,
-            # or a third of the dataset can go missing behind a count.
-            if len(_first_errors) < 5:
-                _first_errors.append(f'{rel}: {e}')
-            return False
+        # Not in the checkout: the annotations reference a crop the repo does
+        # not carry. Reported rather than counted — a third of the dataset
+        # once went missing behind a bare number.
+        if len(_first_errors) < 5:
+            _first_errors.append(f'{sha[:12]}: not in data/crops/')
+        return False
 
     all_shas = list(winner_labels.keys())
     print(f'\nDownloading {len(all_shas)} crops from data/crops/...')
