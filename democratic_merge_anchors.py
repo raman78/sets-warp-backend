@@ -318,7 +318,6 @@ def _merge(
         row = {
             'key':         f'{key[0]}@{key[1]:.2f}',
             'contributors':n_iids,
-            'threshold':   threshold,
             'action':      action,
             'slots':       len(merged.get(key, {}).get('slots') or {})
                                 if action != 'SKIP' else 0,
@@ -333,7 +332,7 @@ def _merge(
 def _print_row(row: dict):
     symbol = {'NEW': '+', 'UPDATE': '~', 'unchanged': '.', 'SKIP': '-'}.get(row['action'], '?')
     print(f'  {symbol} {row["key"]:30s} '
-          f'iids={row["contributors"]:<3} thr={row["threshold"]} '
+          f'iids={row["contributors"]:<3} '
           f'slots={row["slots"]:<3} action={row["action"]}')
 
 

@@ -649,9 +649,26 @@ def main() -> int:
     print(f'Contributors: {len(per_install)}   '
           f'unique sha hashes voted on: {len(name_votes)}')
 
-    if not name_votes:
+    # Not `if not name_votes: return` — the sweep exists for staging files
+    # that no row refers to, which is exactly the state in which there are no
+    # votes to tally. Returning here would make it unreachable in the only
+    # situation it was written for.
+    _ann_iids = {p.split('/')[1] for p in repo_files
+                 if p.startswith('staging/') and p.endswith('/annotations.jsonl')}
+    _voted = {(r.get('crop_sha256') or '').strip()
+              for recs in staging_records.values() for r in recs}
+    _sweepable = any(
+        p.startswith('staging/') and '/crops/' in p and p.endswith('.png')
+        and (Path(p).stem not in _voted
+             or p.split('/')[1] not in _ann_iids)
+        for p in repo_files
+    )
+    if not name_votes and not _sweepable:
         print('No staging entries to merge — nothing to do.')
         return 0
+    if not name_votes:
+        print('No votes to tally, but staging holds files no row refers to '
+              '— running the sweep.')
 
     if args.min != 2:
         print(f'NOTE: --min {args.min} is not a gate for crops — every tallied '
