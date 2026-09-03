@@ -535,6 +535,8 @@ def _apply(
             (r.get('crop_sha256') or '').strip() for r in records
             if (r.get('crop_sha256') or '').strip() not in safe_promoted
         }
+    ann_iids = {p.split('/')[1] for p in repo_files
+                if p.startswith('staging/') and p.endswith('/annotations.jsonl')}
     already_dropped = {op.path_in_repo for op in ops_drain}
     swept = 0
     for path in repo_files:
@@ -545,7 +547,18 @@ def _apply(
             continue
         parts = path.split('/')
         iid, sha = parts[1], Path(parts[-1]).stem
-        if iid in kept_by_iid and sha not in kept_by_iid[iid]:
+        if iid in kept_by_iid:
+            orphan = sha not in kept_by_iid[iid]
+        else:
+            # No annotations.jsonl for this install at all. Uploads write the
+            # PNGs and the rows in one commit, so there is no window where a
+            # crop legitimately has no row — an install in this state was
+            # written by something that is not the upload path, and its crops
+            # can never be tallied. `staging/migration-sister/` is the case
+            # that occurred: a one-off migration left ten of them, and only a
+            # manual script would ever have removed them.
+            orphan = iid not in ann_iids
+        if orphan:
             ops_drain.append(CommitOperationDelete(path_in_repo=path))
             swept += 1
     if swept:

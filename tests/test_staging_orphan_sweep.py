@@ -72,15 +72,15 @@ def test_a_crop_that_still_has_a_row_is_kept(apply_merge):
     assert 'staging/iid/crops/bb.png' not in api.deleted
 
 
-def test_an_install_with_no_rows_at_all_is_not_touched(apply_merge):
-    """No annotations file for that install means nothing has been tallied
-    for it — its crops are not orphans, they are unprocessed."""
+def test_a_row_belonging_to_another_install_does_not_protect_a_crop(apply_merge):
+    """Rows are per install: a crop under one install is not kept alive by a
+    row filed under a different one."""
     api = apply_merge(
-        repo_files=[ANN, 'staging/other/crops/cc.png'],
+        repo_files=[ANN, 'staging/other/crops/bb.png'],
         staging_records={'iid': [_row('bb')]},
     )
 
-    assert 'staging/other/crops/cc.png' not in api.deleted
+    assert 'staging/other/crops/bb.png' in api.deleted
 
 
 def test_data_crops_are_never_swept(apply_merge):
@@ -104,3 +104,20 @@ def test_a_crop_promoted_in_this_batch_is_deleted_once(apply_merge):
     )
 
     assert api.deleted.count('staging/iid/crops/bb.png') <= 1
+
+
+def test_crops_from_an_install_with_no_rows_at_all_are_swept():
+    """Uploads write PNGs and rows in one commit, so an install holding crops
+    and no annotations file was written by something that is not the upload
+    path. `staging/migration-sister/` is the case that occurred; without this
+    the movement audit would report it for ever and only a manual script
+    could clear it."""
+    api = _Api()
+    merge._apply(
+        api, 'token', merged={}, promoted_shas=set(), existing={},
+        crop_src={},
+        repo_files={ANN, 'staging/migration-sister/crops/aa.png'},
+        contributors_for_sha={}, staging_records={'iid': [_row('bb')]},
+    )
+
+    assert 'staging/migration-sister/crops/aa.png' in api.deleted
