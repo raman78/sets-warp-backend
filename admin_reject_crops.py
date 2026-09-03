@@ -264,7 +264,11 @@ def _fetch_crop(sha: str, token: str,
     pixels, no network); falls back to hf_hub_download only for shas the
     mirror lacks. The shallow clone itself holds Git-LFS stubs, not images."""
     if local_dir is not None:
-        p = local_dir / f'{sha}.png'
+        # sto-warp's mirror shards by the first two characters of the sha;
+        # the flat path is where it was before that.
+        p = local_dir / sha[:2] / f'{sha}.png'
+        if not p.exists():
+            p = local_dir / f'{sha}.png'
         if p.exists():
             img = cv2.imread(str(p))
             if img is not None:
