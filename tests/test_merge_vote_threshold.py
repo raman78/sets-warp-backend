@@ -1,14 +1,17 @@
-"""The vote threshold guards changing a verdict, not confirming one.
+"""Staging is a queue: tallying settles every entry, and it empties.
 
-The design: a crop nobody has seen before is taken on one voice; overturning
-a verdict already in `data/` needs a second, independent one. Staging exists
-to hold new evidence against the standing answer and decide whether it holds.
+An entry in `staging/` has arrived from a client, has not been tallied, and is
+not in the models. Tallying it settles it either way, so it is applied and
+drained. Votes then express confidence *in* the record rather than gating
+entry to it: they accumulate on agreement, and a superseded verdict keeps its
+strength on the record so an overturn is auditable rather than silent.
 
-The threshold was applied to both, so a lone vote that *agreed* with `data/`
-was refused, left in staging, and re-tallied every two hours for ever.
-Measured 2026-09-03: 3897 of the 4003 entries in staging were exactly that,
-`unchanged` was unreachable for a single-contributor install, and staging
-could only grow.
+The bar this replaced was "a second, independent voice to overturn" — sound
+for a crowd, and equal to "never" for this project. Measured 2026-09-03: two
+contributors with annotations, 4003 entries in staging of which 3897 merely
+confirmed what `data/` already said and could never drain, and 102
+corrections waiting indefinitely — among them a crop whose stored name,
+`Attack Pattern Beta'`, no cargo row has ever matched.
 
 Offline: no HF, no network.
 """
@@ -21,9 +24,12 @@ import pytest
 import democratic_merge_crops as merge
 
 
-def _existing(sha: str, name: str, votes: int = 5) -> dict:
-    return {sha: {'crop_sha256': sha, 'name': name, 'slot': 'Deflector',
-                  'votes': votes, 'losers': {'Other Thing': 2}}}
+def _existing(sha: str, name: str, votes: int = 5, losers: dict | None = None):
+    rec = {'crop_sha256': sha, 'name': name, 'slot': 'Deflector',
+           'votes': votes}
+    if losers:
+        rec['losers'] = losers
+    return {sha: rec}
 
 
 def _run(name_votes: dict, existing: dict, min_votes: int = 2):
@@ -35,9 +41,9 @@ def _action(report, sha: str) -> str:
     return next(r['action'] for r in report if r['sha'] == sha)
 
 
-# ── One voice is enough for something new ──────────────────────────────────
+# ── Everything tallied is settled, so staging empties ──────────────────────
 
-def test_a_crop_nobody_has_seen_is_taken_on_one_vote():
+def test_a_new_crop_enters_on_one_vote():
     merged, report, promoted = _run({'aa': Counter({'Deflector Array': 1})}, {})
 
     assert _action(report, 'aa') == 'NEW'
@@ -45,58 +51,67 @@ def test_a_crop_nobody_has_seen_is_taken_on_one_vote():
     assert 'aa' in promoted
 
 
-# ── A confirming vote settles nothing, and must drain ──────────────────────
+def test_a_lone_correction_is_applied():
+    """The case that used to wait for a second voice that never came."""
+    merged, report, promoted = _run({'aa': Counter({"Attack Pattern Beta": 1})},
+                                    _existing('aa', "Attack Pattern Beta'"))
 
-def test_a_lone_vote_that_agrees_is_accepted():
-    merged, report, promoted = _run({'aa': Counter({'Deflector Array': 1})},
-                                    _existing('aa', 'Deflector Array'))
-
-    assert _action(report, 'aa') == 'unchanged'
-
-
-def test_a_confirming_vote_drains_from_staging():
-    """Left in staging it is re-tallied on every run, for ever — which is how
-    4003 entries came to be waiting on a two-hourly job."""
-    _merged, _report, promoted = _run({'aa': Counter({'Deflector Array': 1})},
-                                      _existing('aa', 'Deflector Array'))
-
+    assert _action(report, 'aa') == 'UPDATE'
+    assert merged['aa']['name'] == 'Attack Pattern Beta'
     assert 'aa' in promoted
 
 
-def test_a_confirming_vote_does_not_rewrite_the_record():
-    """The verdict has not changed, so neither has the evidence for it.
-    Rewriting would report a consensus of 5 as a consensus of 1."""
-    existing = _existing('aa', 'Deflector Array', votes=5)
-    merged, _report, _promoted = _run({'aa': Counter({'Deflector Array': 1})},
-                                      existing)
+@pytest.mark.parametrize('votes,existing_name', [
+    (Counter({'Deflector Array': 1}), 'Deflector Array'),      # confirms
+    (Counter({'Something Else': 1}),  'Deflector Array'),      # overturns
+    (Counter({'Deflector Array': 3}), None),                   # new
+])
+def test_every_tallied_entry_drains(votes, existing_name):
+    existing = _existing('aa', existing_name) if existing_name else {}
+    _merged, _report, promoted = _run({'aa': votes}, existing)
 
-    assert merged['aa']['votes'] == 5
-    assert merged['aa']['losers'] == {'Other Thing': 2}
-
-
-# ── Overturning still needs corroboration ──────────────────────────────────
-
-def test_a_lone_vote_cannot_overturn_a_verdict():
-    merged, report, promoted = _run({'aa': Counter({'Something Else': 1})},
-                                    _existing('aa', 'Deflector Array'))
-
-    assert _action(report, 'aa') == 'SKIP'
-    assert merged['aa']['name'] == 'Deflector Array'
-    assert 'aa' not in promoted, 'a refused vote must stay for a second opinion'
+    assert 'aa' in promoted, 'left in staging, to be re-tallied for ever'
 
 
-def test_two_voices_overturn_it():
-    merged, report, _promoted = _run({'aa': Counter({'Something Else': 2})},
-                                     _existing('aa', 'Deflector Array'))
+# ── Votes express confidence ───────────────────────────────────────────────
 
-    assert _action(report, 'aa') == 'UPDATE'
-    assert merged['aa']['name'] == 'Something Else'
+def test_agreement_accumulates():
+    """Five confirmations must not read as one; the number is the whole
+    signal the tail review sorts on."""
+    merged, _r, _p = _run({'aa': Counter({'Deflector Array': 2})},
+                          _existing('aa', 'Deflector Array', votes=5))
+
+    assert merged['aa']['votes'] == 7
 
 
-@pytest.mark.parametrize('min_votes,expected', [(1, 'UPDATE'), (3, 'SKIP')])
-def test_the_bar_for_overturning_follows_min_votes(min_votes, expected):
-    _merged, report, _promoted = _run({'aa': Counter({'Something Else': 2})},
-                                      _existing('aa', 'Deflector Array'),
-                                      min_votes=min_votes)
+def test_an_overturned_verdict_starts_from_its_own_count():
+    merged, _r, _p = _run({'aa': Counter({'Something Else': 1})},
+                          _existing('aa', 'Deflector Array', votes=5))
 
-    assert _action(report, 'aa') == expected
+    assert merged['aa']['votes'] == 1
+
+
+def test_the_superseded_verdict_keeps_its_strength_on_the_record():
+    """An overturn has to be reversible: without this, five votes of evidence
+    vanish and nothing downstream can tell a contested entry from a settled
+    one."""
+    merged, _r, _p = _run({'aa': Counter({'Something Else': 1})},
+                          _existing('aa', 'Deflector Array', votes=5))
+
+    assert merged['aa']['losers']['Deflector Array'] == 5
+
+
+def test_existing_dissent_survives_a_confirmation():
+    merged, _r, _p = _run({'aa': Counter({'Deflector Array': 1})},
+                          _existing('aa', 'Deflector Array', votes=5,
+                                    losers={'Other Thing': 2}))
+
+    assert merged['aa']['losers']['Other Thing'] == 2
+
+
+def test_a_weak_entry_is_visibly_weak():
+    """What the tail review is for: one vote and no corroboration."""
+    merged, _r, _p = _run({'aa': Counter({'Deflector Array': 1})}, {})
+
+    assert merged['aa']['votes'] == 1
+    assert 'losers' not in merged['aa']

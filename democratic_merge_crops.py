@@ -285,35 +285,30 @@ def _merge(
         old_rec       = existing.get(sha)
         old_name      = (old_rec or {}).get('name', '')
 
-        # The threshold guards *changing* a verdict, not confirming one.
-        # A staging vote that agrees with what data/ already says has done
-        # its job the moment it is counted: it is corroboration, there is
-        # nothing to decide, and holding it back only means re-tallying the
-        # same vote every two hours for ever. Measured 2026-09-03 before
-        # this: 3897 of the 4003 entries in staging were exactly that, and
-        # `unchanged` was unreachable — a single-contributor install could
-        # never drain one.
+        # Staging is a queue, not a holding pen: an entry has arrived from a
+        # client, has not been tallied yet, and is not in the models. Tallying
+        # it settles it either way, so every entry is applied and staging
+        # empties. Votes then express confidence in the record rather than
+        # gating entry to it — they accumulate on agreement and reset when a
+        # verdict is superseded, so a weak signal is visibly weak and can be
+        # reviewed as such.
         #
-        # Overturning a verdict still needs a second, independent voice, and
-        # a crop nobody has seen before still needs only one.
-        if sha not in existing:
-            accepted = True
-        elif old_name == winner:
-            accepted = True
-        else:
-            accepted = count >= min_votes
+        # The bar this replaces was "a second, independent voice to overturn",
+        # which is sound for a crowd and means "never" for this project:
+        # measured 2026-09-03 there are two contributors with annotations, and
+        # 102 corrections had been waiting indefinitely — among them a crop
+        # whose stored name, `Attack Pattern Beta'`, no cargo row has ever
+        # matched. Nothing surfaced them, and the models kept training on the
+        # label a human had already corrected.
+        accepted = True
+
+        old_votes = int((old_rec or {}).get('votes') or 0)
 
         action = 'SKIP'
-        if accepted and old_name == winner:
-            # Confirmed, not changed: leave the record in data/ exactly as it
-            # is. Rewriting it would replace the vote count and the recorded
-            # dissent from whenever the verdict was set with this batch's —
-            # a single confirming vote would report the consensus as 1. The
-            # sha still counts as promoted so the staging copy drains.
-            action = 'unchanged'
-            promoted_shas.add(sha)
-        elif accepted:
-            if old_name:
+        if accepted:
+            if old_name == winner:
+                action = 'unchanged'
+            elif old_name:
                 action = 'UPDATE'
             else:
                 action = 'NEW'
@@ -321,12 +316,26 @@ def _merge(
             slot_c = slot_votes.get(sha) or Counter()
             slot   = slot_c.most_common(1)[0][0] if slot_c else ''
             losers_dict = {n: v for n, v in votes.most_common()[1:4] if n != winner}
+            if action == 'unchanged':
+                # Agreement accumulates. Replacing the count with this
+                # batch's would make five confirmations read as one, which
+                # is the opposite of what the number is for.
+                total_votes = old_votes + count
+                losers_dict = {**((old_rec or {}).get('losers') or {}),
+                               **losers_dict}
+            else:
+                total_votes = count
+            if action == 'UPDATE':
+                # The superseded verdict keeps its strength on the record, so
+                # an overturn is auditable and reversible rather than a
+                # silent replacement.
+                losers_dict = {old_name: old_votes or 1, **losers_dict}
             entry: dict = {
                 'schema_version': 2,
                 'crop_sha256': sha,
                 'name':        winner,
                 'slot':        slot,
-                'votes':       count,
+                'votes':       total_votes,
                 'updated_at':  datetime.now(UTC).isoformat(timespec='seconds')
                                                 .replace('+00:00', 'Z'),
             }
@@ -538,8 +547,12 @@ def main() -> int:
                          f'One commit for everything is what broke; see '
                          f'COMMIT_CHUNK.')
     ap.add_argument('--min',     type=int, default=2, metavar='N',
-                    help='Minimum votes for existing sha (default: 2). '
-                         'New sha always require only 1.')
+                    help='Accepted for compatibility with the shared merge '
+                         'workflow and NOT enforced here: every tallied entry '
+                         'is applied and staging empties. Confidence is '
+                         'recorded as the vote count, not used as a gate. '
+                         'A value other than the default is reported at the '
+                         'top of the run so it cannot look effective.')
     ap.add_argument('--since',   metavar='YYYY-MM-DD',
                     help='Only count entries with date >= this')
     ap.add_argument('--verbose', action='store_true',
@@ -590,6 +603,11 @@ def main() -> int:
     if not name_votes:
         print('No staging entries to merge — nothing to do.')
         return 0
+
+    if args.min != 2:
+        print(f'NOTE: --min {args.min} is not a gate for crops — every tallied '
+              f'entry is applied and staging empties. The vote count is '
+              f'recorded on the entry instead.')
 
     merged, report, promoted_shas = _merge(
         name_votes, slot_votes, existing,
