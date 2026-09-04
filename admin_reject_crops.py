@@ -653,15 +653,24 @@ def apply(snap_dir: Path, decisions: list[dict], api, repo_files: set[str],
                if d['decision'] == 'RELABEL'}
     keep = {s for s, d in by_sha.items() if d['decision'] == 'KEEP'}
 
-    # Guard: RELABEL names must exist in the cargo list. Refuse the whole
-    # commit otherwise — never write a hand-typed / mistyped label.
+    # Guard: RELABEL names must exist in the vocabulary the crop's slot
+    # allows. Refuse the whole commit otherwise — never write a hand-typed or
+    # mistyped label.
+    #
+    # Per slot, not one global item list: a `Ship Type` crop is labelled with
+    # a ship name, which is not an item and would be refused by an item-only
+    # check. That is the same mistake `_scan_weakest` made until 2026-09-04,
+    # where it flagged every text band as unresolvable.
     if relabel:
         if not canonical:
             print('ERROR: cargo list is empty — cannot validate RELABEL names. '
                   'Point --cargo-dir at a populated sto-warp cache.',
                   file=sys.stderr)
             return False
-        bad = {s: n for s, n in relabel.items() if n not in canonical}
+        vocab = load_vocabularies()
+        bad = {s: n for s, n in relabel.items()
+               if _name_resolves_nowhere(n, (data.get(s) or {}).get('slot') or '',
+                                         vocab)}
         if bad:
             print('ERROR: RELABEL name(s) not in cargo — aborting (no commit):',
                   file=sys.stderr)
