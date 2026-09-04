@@ -135,6 +135,39 @@ def _load_rejected_shas(snap_dir) -> set[str]:
     return out
 
 
+def _load_relabelled(snap_dir) -> dict[str, str]:
+    """crop_sha256 → the name the maintainer relabelled it to.
+
+    The ledger records RELABEL beside REJECT, and until now only REJECT was
+    read back. A relabel was therefore written to `data/` and left unguarded:
+    the merge is a queue, so the next client to upload that crop under its old
+    name overwrote the correction with a single vote. Measured 2026-09-04 —
+    `Fleet Support Cruiser (T6)`, corrected at 10:24, was back by 16:28.
+
+    A maintainer looked at the picture; a client's label is whatever its
+    recogniser or its user offered. So the maintainer's name is pinned and
+    incoming votes cannot move it. Last entry wins, which is what makes a
+    correction correctable — re-reviewing the same sha supersedes it.
+    """
+    out: dict[str, str] = {}
+    local = Path(snap_dir) / LEDGER
+    if not local.exists():
+        return out
+    with open(local, encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            if (d.get('decision') == 'RELABEL' and d.get('crop_sha256')
+                    and (d.get('name') or '').strip()):
+                out[d['crop_sha256']] = d['name'].strip()
+    return out
+
+
 def _load_existing(snap_dir) -> dict[str, dict]:
     """Load current data/annotations.jsonl → dict keyed by crop_sha256.
 
@@ -262,6 +295,7 @@ def _merge(
     existing:   dict[str, dict],
     verbose:    bool,
     rejected:   set[str] | None = None,
+    relabelled: dict[str, str] | None = None,
 ) -> tuple[dict[str, dict], list[dict], set[str]]:
     """Majority vote. Returns (merged, report_rows, promoted_shas).
 
@@ -280,11 +314,41 @@ def _merge(
     if dropped_poison:
         print(f'[clean] dropped {dropped_poison} legacy poison / rejected entries')
 
+    # Same self-heal for a correction that was overwritten before the pin
+    # existed. Without this the pin only bites on the *next* upload of that
+    # crop, so a name overwritten in the past stays wrong until someone
+    # happens to photograph the same slot again — which for a rare item is
+    # never. Applied here so one merge run restores every past correction.
+    healed = 0
+    for sha, name in (relabelled or {}).items():
+        rec = merged.get(sha)
+        if rec is not None and (rec.get('name') or '') != name:
+            rec = dict(rec)
+            rec['name'] = name
+            rec['relabeled_at'] = datetime.now(UTC).isoformat(
+                timespec='seconds').replace('+00:00', 'Z')
+            merged[sha] = rec
+            healed += 1
+    if healed:
+        print(f'[clean] restored {healed} maintainer correction(s) that had '
+              f'been overwritten')
+
     report: list[dict] = []
     promoted_shas: set[str] = set()
 
+    pinned = relabelled or {}
+
     for sha, votes in sorted(name_votes.items()):
         winner, count = votes.most_common(1)[0]
+        # A maintainer who reviewed this crop outranks the tally. They looked
+        # at the picture; a client's label is whatever its recogniser or its
+        # user offered, and one such vote used to overwrite the correction on
+        # the next merge. The losing votes are still recorded below, so the
+        # disagreement stays visible rather than being erased.
+        if sha in pinned and pinned[sha] != winner:
+            votes = Counter(votes)
+            votes[pinned[sha]] = max(votes.values()) + 1
+            winner, count = pinned[sha], votes[pinned[sha]]
         old_rec       = existing.get(sha)
         old_name      = (old_rec or {}).get('name', '')
 
@@ -708,6 +772,10 @@ def main() -> int:
     print(f'Existing data/annotations.jsonl: {len(existing)} entries')
 
     rejected = _load_rejected_shas(snap_dir)
+    relabelled = _load_relabelled(snap_dir)
+    if relabelled:
+        print(f'Review ledger: {len(relabelled)} sha(s) pinned to a '
+              f'maintainer-corrected name')
     if rejected:
         print(f'Review ledger: {len(rejected)} rejected sha(s) barred from data/')
 
@@ -744,9 +812,17 @@ def main() -> int:
         and (r.get('crop_sha256') or '').strip() not in existing
         for recs in staging_records.values() for r in recs
     )
-    if not name_votes and not _sweepable:
+    # A correction overwritten before the pin existed needs no vote and no
+    # staging file to restore, so it is invisible to both tests above. Third
+    # time this early exit has hidden work from itself; check for it too.
+    _unhealed = any(existing.get(sha, {}).get('name') not in (None, nm)
+                    for sha, nm in relabelled.items() if sha in existing)
+    if not name_votes and not _sweepable and not _unhealed:
         print('No staging entries to merge — nothing to do.')
         return 0
+    if not name_votes and _unhealed:
+        print('No votes to tally, but data/ holds a maintainer correction '
+              'that was overwritten — running the merge to restore it.')
     if not name_votes:
         print('No votes to tally, but staging holds files no row refers to '
               '— running the sweep.')
@@ -758,7 +834,7 @@ def main() -> int:
 
     merged, report, promoted_shas = _merge(
         name_votes, slot_votes, existing,
-        verbose=args.verbose, rejected=rejected)
+        verbose=args.verbose, rejected=rejected, relabelled=relabelled)
 
     new_count    = sum(1 for r in report if r['action'] == 'NEW')
     update_count = sum(1 for r in report if r['action'] == 'UPDATE')
