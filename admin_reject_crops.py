@@ -204,6 +204,55 @@ def _load_ledger(snap_dir: Path) -> dict[str, dict]:
     return _load_jsonl_by_sha(snap_dir / LEDGER)
 
 
+_SHIP_TIER_VALUES = frozenset({
+    'T1', 'T2', 'T3', 'T4', 'T5', 'T6',
+    'T5-U', 'T5-X', 'T6-X', 'T6-X2',
+})
+
+
+def load_vocabularies() -> dict[str, set[str]]:
+    """The name sets a crop's label can legitimately belong to, by kind.
+
+    Three, because a crop's slot decides which one applies: icon slots hold
+    item names, a `Ship Type` band holds a ship name, a `Ship Tier` band holds
+    a tier token. Sourced from sto-warp for the same reason
+    `load_canonical_names` is — one definition of what the client recognises.
+
+    A missing set means "cannot check", and `_name_resolves_nowhere` then
+    declines to flag rather than guessing.
+    """
+    vocab: dict[str, set[str]] = {'items': load_canonical_names(),
+                                  'ships': set(),
+                                  'tiers': set(_SHIP_TIER_VALUES)}
+    try:
+        from warp.data.cargo import ships
+        vocab['ships'] = set(ships().keys())
+    except Exception as e:
+        print(f'WARNING: ship list unavailable ({e}) — ship-name labels '
+              f'will not be checked.', file=sys.stderr)
+    return vocab
+
+
+def _name_resolves_nowhere(name: str, slot: str, vocab: dict[str, set[str]]) -> bool:
+    """True if `name` is in none of the vocabularies its slot allows.
+
+    Ship Type is checked against the ship roster *and* the item names: the
+    slot is assigned by the detector and a mislabelled row is exactly what
+    this hunts, so a real item sitting in a text slot should not be reported
+    as an unresolvable name.
+    """
+    slot = (slot or '').strip()
+    if slot.startswith(('ship_tier', 'Ship Tier')):
+        pool = vocab['tiers'] | vocab['items']
+    elif slot.startswith(('ship_type', 'Ship Type', 'Ship Name')):
+        pool = vocab['ships'] | vocab['items']
+    else:
+        pool = vocab['items']
+    # An empty pool means the vocabulary could not be loaded. Flagging then
+    # would mark the entire dataset.
+    return bool(pool) and name not in pool
+
+
 def load_canonical_names() -> set[str]:
     """Valid RELABEL targets, taken straight from sto-warp's own cargo loader
     (`warp.data.cargo.canonical_names`) — the single source of truth. We do
@@ -311,7 +360,7 @@ def _scan_weakest(data: dict[str, dict],
     # queue almost everything enters on one vote, so the "weakest 200" would
     # be an alphabetical slice of thousands of identical scores. What makes a
     # single vote worth a look is the company it keeps.
-    canon = load_canonical_names()
+    vocab = load_vocabularies()
     scored = []
     for sha, rec in data.items():
         name = (rec.get('name') or '').strip()
@@ -330,7 +379,14 @@ def _scan_weakest(data: dict[str, dict],
             flags.append('overturned-stronger')
         # A name nothing downstream can resolve. The models learn it, the
         # exporter cannot write it, and no user typed it on purpose.
-        if canon and name not in canon:
+        #
+        # Which vocabulary counts depends on the slot. A `Ship Type` band
+        # holds a ship name and a `Ship Tier` band holds `T6`; neither is an
+        # item, so checking them against the item cargo flags every one of
+        # them. Measured 2026-09-04 on 12274 entries: 151 flagged, of which
+        # 137 were those two slots — 91% noise burying 14 real hits, the same
+        # way `no-real-slot` used to.
+        if _name_resolves_nowhere(name, rec.get('slot') or '', vocab):
             flags.append('name-not-in-cargo')
         # `slot='migrated'` was a flag here and has been dropped. It fires on
         # 2848 of 12274 entries — a quarter of the dataset — so it ranks
