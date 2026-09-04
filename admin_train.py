@@ -227,6 +227,65 @@ def _create_commit_with_retry(api, repo_id: str, repo_type: str,
     return False
 
 
+# ── Publication guard ──────────────────────────────────────────────────────
+#
+# A training run that collapses must not reach users. This has happened: a
+# model carrying 1592 of ~3000 classes was published and served, because the
+# crop download had silently lost most of the dataset and nothing compared
+# the result against what was already out there. The run was green.
+#
+# The thresholds are deliberately loose. This is not a quality gate — a model
+# that trains a little worse is still a model — it is a collapse detector,
+# and its job is to be silent until something is badly wrong.
+
+MODEL_MIN_CLASS_RATIO = 0.90   # published classes may not fall below 90% of the last release
+MODEL_MAX_ACC_DROP    = 0.10   # nor validation accuracy by more than 10 points
+
+
+def _published_model_version() -> dict:
+    """The `model_version.json` currently served, or {} if none/unreadable.
+
+    Read from the published repo rather than from a local file: the guard has
+    to compare against what users would actually be downgraded from.
+    """
+    try:
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(repo_id=HF_REPO_ID, filename='models/model_version.json',
+                               repo_type='dataset', token=HF_TOKEN or None)
+        return json.loads(Path(path).read_text(encoding='utf-8'))
+    except Exception as e:
+        log.warning(f'publication guard: no published version to compare against ({e})')
+        return {}
+
+
+def _publication_refusal(n_classes: int, val_acc: float, previous: dict) -> str:
+    """Why this model must not be published, or '' when it may be.
+
+    Returns a sentence rather than a bool so the caller can log what it saw;
+    a guard that only says "no" gets disabled the first time it fires.
+
+    With no previous version there is nothing to regress from, so the first
+    publication always proceeds — refusing it would deadlock a fresh repo.
+    """
+    prev_classes = int(previous.get('n_classes') or 0)
+    prev_acc     = float(previous.get('val_acc') or 0.0)
+
+    if prev_classes <= 0:
+        return ''
+
+    floor = int(prev_classes * MODEL_MIN_CLASS_RATIO)
+    if n_classes < floor:
+        return (f'class count collapsed: {n_classes} against {prev_classes} '
+                f'published, below the {MODEL_MIN_CLASS_RATIO:.0%} floor of '
+                f'{floor}. The dataset most likely failed to download in full.')
+
+    if prev_acc > 0 and (prev_acc - val_acc) > MODEL_MAX_ACC_DROP:
+        return (f'validation accuracy fell from {prev_acc:.1%} to {val_acc:.1%}, '
+                f'more than the {MODEL_MAX_ACC_DROP:.0%} allowed.')
+
+    return ''
+
+
 def _upload_model(models_dir: Path, n_classes: int, val_acc: float,
                   n_samples: int, n_users: int,
                   sc_val_acc: float | None = None,
@@ -241,6 +300,14 @@ def _upload_model(models_dir: Path, n_classes: int, val_acc: float,
 
     if not pt_path.exists():
         log.error('icon_classifier.pt not found — nothing to upload')
+        return False
+
+    refusal = _publication_refusal(n_classes, val_acc, _published_model_version())
+    if refusal:
+        log.error(f'REFUSING TO PUBLISH — {refusal}')
+        log.error('The previously published model stays in place. Investigate '
+                  'the run before forcing anything: a collapsed model reaches '
+                  'every user on their next start.')
         return False
 
     # Compute version hash (sha256 of icon model file, first 16 hex chars)
