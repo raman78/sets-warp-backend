@@ -32,9 +32,9 @@ def _existing(sha: str, name: str, votes: int = 5, losers: dict | None = None):
     return {sha: rec}
 
 
-def _run(name_votes: dict, existing: dict, min_votes: int = 2):
+def _run(name_votes: dict, existing: dict):
     return merge._merge(name_votes, {}, existing,
-                        min_votes=min_votes, verbose=False, rejected=set())
+                        verbose=False, rejected=set())
 
 
 def _action(report, sha: str) -> str:

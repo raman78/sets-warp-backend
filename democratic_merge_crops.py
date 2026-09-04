@@ -14,7 +14,11 @@ crop_sha256, and publishes the winners to:
 
 Rules:
     - one vote per (install_id, sha): duplicate uploads don't stack
-    - threshold: --min (default 2) for sha already in data/, 1 for new sha
+    - no threshold: staging is a queue, so tallying settles every entry and
+      drains it. Votes express confidence *in* a record rather than gating
+      entry to it — they accumulate on agreement, and a superseded verdict
+      keeps its strength so an overturn is auditable. `--min` survives for
+      `admin_merge.py`, which still gates knowledge entries on it.
     - poison filter: names starting with '__' or 'Test Item Name' dropped
       (virtual classes used as training markers — must never leak into
       the lookup table)
@@ -256,7 +260,6 @@ def _merge(
     name_votes: dict[str, Counter],
     slot_votes: dict[str, Counter],
     existing:   dict[str, dict],
-    min_votes:  int,
     verbose:    bool,
     rejected:   set[str] | None = None,
 ) -> tuple[dict[str, dict], list[dict], set[str]]:
@@ -677,7 +680,7 @@ def main() -> int:
 
     merged, report, promoted_shas = _merge(
         name_votes, slot_votes, existing,
-        min_votes=args.min, verbose=args.verbose, rejected=rejected)
+        verbose=args.verbose, rejected=rejected)
 
     new_count    = sum(1 for r in report if r['action'] == 'NEW')
     update_count = sum(1 for r in report if r['action'] == 'UPDATE')
