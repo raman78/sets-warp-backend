@@ -88,6 +88,14 @@ MIN_CROP_PX            = 16
 MIN_TEXT_CROP_H        = 10
 MIN_TEXT_CROP_W        = 50
 MAX_NAME_LEN           = 120
+# A single install's whole SETS-gap ledger arrives in one request. The cap is
+# generous because the payload is names only, and an install that legitimately
+# hit hundreds of distinct unimportable items is exactly the signal we want.
+MAX_SETS_GAP_ITEMS     = 500
+# The two causes a gap can have. They are requests to two different projects
+# (the wiki vs SETS), so an unknown third value is a client/server version
+# mismatch and is rejected rather than silently filed under the wrong one.
+SETS_GAP_REASONS       = frozenset({'missing-from-cargo', 'sets-loader-skips'})
 _TEXT_CROP_PREFIXES    = ('ship_type_', 'ship_tier_')
 _INSTALL_ID_RE         = re.compile(r'^[a-zA-Z0-9_-]{8,64}$')
 _SCREEN_TYPE_RE        = re.compile(r'^[a-zA-Z0-9_-]{1,40}$')
@@ -243,6 +251,20 @@ class _AnchorGrid(BaseModel):
 class AnchorsRequest(BaseModel):
     install_id: str               = Field(..., min_length=8, max_length=64)
     grids:      list[_AnchorGrid] = Field(..., min_length=1, max_length=MAX_BULK_ANCHOR_GRIDS)
+
+
+class _SetsGapItem(BaseModel):
+    # One item WARP recognised that SETS drops on import. No image and no
+    # build — the name is the whole payload, because the only question this
+    # answers is "how many installs hit this item".
+    name:   str       = Field(..., min_length=1, max_length=MAX_NAME_LEN)
+    reason: str       = Field(..., min_length=1, max_length=40)
+    slots:  list[str] = Field(default_factory=list, max_length=12)
+
+
+class SetsGapsRequest(BaseModel):
+    install_id: str                = Field(..., min_length=8, max_length=64)
+    items:      list[_SetsGapItem] = Field(..., max_length=MAX_SETS_GAP_ITEMS)
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
@@ -639,6 +661,89 @@ async def upload_anchors(req: AnchorsRequest, request: Request):
 
     log.info(f'Anchors accepted: install={install_id[:8]} accepted={accepted} rejected={rejected}')
     return {'ok': True, 'accepted': accepted, 'rejected': rejected}
+
+
+@app.post('/upload/sets-gaps')
+async def upload_sets_gaps(req: SetsGapsRequest, request: Request):
+    """Accept one install's tally of items SETS drops on import.
+
+    These are items WARP recognised correctly and SETS cannot place — either
+    no cargo table stores them (a request to the wiki) or its build loader
+    passes the row over (a request to SETS). Collected here so the case for
+    fixing either can be made from how many installs actually hit the item,
+    rather than from whichever build someone happened to post.
+
+    The request carries the install's **whole current ledger**, and it
+    replaces that install's file outright. Two consequences, both wanted:
+    re-sending is idempotent, so a retry or a second client on the same
+    machine cannot inflate the count; and an item that stops appearing (the
+    wiki added the cargo row) drops out on its own, so the list shrinks
+    without anyone sweeping it.
+
+    Counting is therefore per install, never per export. One user exporting
+    the same build two hundred times is one data point — the opposite would
+    make a single enthusiastic user look like demand.
+
+    No image and no build is sent, only item names.
+    """
+    client_ip  = _get_client_ip(request)
+    install_id = req.install_id.strip()
+    if not await _check_and_increment_rate_limit(client_ip, install_id or None):
+        raise HTTPException(429, 'Rate limit exceeded. Try again tomorrow.')
+
+    if not _INSTALL_ID_RE.match(install_id):
+        raise HTTPException(400, 'Invalid install_id format')
+
+    accepted: list[dict] = []
+    rejected = 0
+    reasons: list[str] = []
+    seen: set[tuple[str, str]] = set()
+
+    for item in req.items:
+        name = item.name.strip()
+        if not name:
+            rejected += 1
+            reasons.append('empty name')
+            continue
+        if item.reason not in SETS_GAP_REASONS:
+            rejected += 1
+            reasons.append(f'unknown reason {item.reason!r}')
+            continue
+        # The reason is part of the identity: the same name can legitimately
+        # appear under both causes, and merging them would collapse two
+        # separate upstream requests into one nobody can act on.
+        key = (item.reason, name)
+        if key in seen:
+            continue
+        seen.add(key)
+        accepted.append({
+            'name':   name,
+            'reason': item.reason,
+            'slots':  sorted({s.strip() for s in item.slots if s.strip()})[:12],
+        })
+
+    # An empty ledger is a valid state to report — it is how an install says
+    # "I no longer hit any of these". Writing it is what lets stale entries
+    # expire instead of being pinned forever by a single old upload.
+    payload = json.dumps({
+        'install_id': install_id,
+        'items':      sorted(accepted, key=lambda e: (e['reason'], e['name'])),
+        'updated_at': datetime.now(timezone.utc).isoformat(timespec='seconds')
+                                                .replace('+00:00', 'Z'),
+    }, ensure_ascii=False, indent=2, sort_keys=True)
+
+    ok = _hf_upload_files(
+        {f'sets_gaps/{install_id}.json': payload.encode('utf-8')},
+        message=f'WARP SETS gaps: {len(accepted)} item(s) from one install',
+        repo_id=HF_ICONS_REPO_ID,
+    )
+    if not ok:
+        raise HTTPException(503, 'Storage unavailable, please try later')
+
+    log.info(f'SETS gaps accepted: install={install_id[:8]} '
+             f'items={len(accepted)} rejected={rejected}')
+    return {'ok': True, 'accepted': len(accepted), 'rejected': rejected,
+            'reasons': reasons[:3]}
 
 
 @app.post('/webhooks/hf-dataset')
