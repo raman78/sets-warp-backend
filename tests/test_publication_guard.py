@@ -92,3 +92,74 @@ def test_a_previous_version_with_no_accuracy_still_guards_the_class_count():
     refusal = t._publication_refusal(1000, 0.80, {'n_classes': 3187})
 
     assert refusal
+
+
+# ── Both trainers, one threshold ───────────────────────────────────────────
+#
+# The embedder was published unguarded until 2026-09-05, and it is the model
+# that matters more: it is the primary matcher for BOFF abilities and carries
+# the `__empty__` / `__inactive__` gallery classes. A collapsed one does not
+# recognise less — it answers with the nearest class it still holds, which
+# reads as confident recognition of the wrong item.
+
+
+def _embedder_dir(tmp_path, n_classes: int, recall: float):
+    """A models dir shaped as `_upload_embedder` expects to find it."""
+    import json
+    (tmp_path / 'icon_embedder.pt').write_bytes(b'weights')
+    (tmp_path / 'embedder_label_map.json').write_text('{}')
+    (tmp_path / 'embedding_index.npz').write_bytes(b'idx')
+    (tmp_path / 'icon_embedder_meta.json').write_text(json.dumps(
+        {'n_classes': n_classes, 'val_recall@1': recall}))
+    return tmp_path
+
+
+def test_a_collapsed_embedder_is_not_committed(tmp_path, monkeypatch):
+    """Drives the real upload path: the guard must stop it before any commit,
+    not merely exist in the file."""
+    import admin_train_metric as m
+
+    committed = []
+    monkeypatch.setattr(m, '_create_commit_with_retry',
+                        lambda *a, **k: committed.append(a) or True)
+    monkeypatch.setattr(m, '_published_embedder_meta',
+                        lambda: {'n_classes': 3187, 'val_acc': 0.88})
+
+    ok = m._upload_embedder(_embedder_dir(tmp_path, 1592, 0.88))
+
+    assert ok is False
+    assert committed == []
+
+
+def test_a_healthy_embedder_is_committed(tmp_path, monkeypatch):
+    """The guard must not be the thing that stops normal publication."""
+    import admin_train_metric as m
+
+    committed = []
+    monkeypatch.setattr(m, '_create_commit_with_retry',
+                        lambda *a, **k: committed.append(a) or True)
+    monkeypatch.setattr(m, '_published_embedder_meta',
+                        lambda: {'n_classes': 3187, 'val_acc': 0.88})
+
+    ok = m._upload_embedder(_embedder_dir(tmp_path, 3200, 0.89))
+
+    assert ok is True
+    assert len(committed) == 1
+
+
+def test_the_embedder_recall_is_read_as_the_shared_accuracy(tmp_path, monkeypatch):
+    """The embedder records `val_recall@1` where the classifier records
+    `val_acc`. A drop in it must trigger the shared guard, which means the
+    mapping has to happen — not just be written down."""
+    import admin_train_metric as m
+
+    committed = []
+    monkeypatch.setattr(m, '_create_commit_with_retry',
+                        lambda *a, **k: committed.append(a) or True)
+    monkeypatch.setattr(m, '_published_embedder_meta',
+                        lambda: {'n_classes': 3187, 'val_acc': 0.88})
+
+    ok = m._upload_embedder(_embedder_dir(tmp_path, 3187, 0.60))
+
+    assert ok is False
+    assert committed == []

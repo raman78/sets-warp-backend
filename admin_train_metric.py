@@ -609,6 +609,27 @@ def _fit_metric(crops: list, labels: list[str],
 
 # ── HF upload ────────────────────────────────────────────────────────────────
 
+def _published_embedder_meta() -> dict:
+    """The embedder metadata currently served, shaped like the classifier's.
+
+    `_publication_refusal` reads `n_classes` and `val_acc`; the embedder
+    records its accuracy as `val_recall@1`, so it is mapped here rather than
+    teaching the shared guard about two spellings.
+    """
+    try:
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(repo_id=HF_REPO_ID,
+                               filename='models/icon_embedder_meta.json',
+                               repo_type='dataset', token=HF_TOKEN or None)
+        prev = json.loads(Path(path).read_text(encoding='utf-8'))
+        return {'n_classes': prev.get('n_classes'),
+                'val_acc':   prev.get('val_recall@1')}
+    except Exception as e:
+        print(f'publication guard: no published embedder to compare against ({e})',
+              file=sys.stderr)
+        return {}
+
+
 def _upload_embedder(models_dir: Path) -> bool:
     """Upload icon_embedder.pt + label_map.json + embedding_index.npz + meta to
     sets-sto/warp-knowledge under models/. Mirrors admin_train._upload_model().
@@ -621,6 +642,32 @@ def _upload_embedder(models_dir: Path) -> bool:
     meta = models_dir / 'icon_embedder_meta.json'
     if not pt.exists():
         print('ERROR: icon_embedder.pt not found — nothing to upload')
+        return False
+
+    # Same collapse guard the softmax trainer got, on the same thresholds.
+    # This model matters more, not less: it is the primary matcher for BOFF
+    # abilities and it carries the `__empty__` / `__inactive__` gallery
+    # classes, so a collapsed one does not merely recognise less — it starts
+    # answering with the nearest thing it still knows.
+    #
+    # The two trainers share `_publication_refusal` rather than each holding a
+    # copy: two thresholds that drift apart are worse than one that is wrong.
+    try:
+        this = json.loads(meta.read_text(encoding='utf-8')) if meta.exists() else {}
+    except Exception:
+        this = {}
+    from admin_train import _publication_refusal
+    refusal = _publication_refusal(
+        int(this.get('n_classes') or 0),
+        float(this.get('val_recall@1') or 0.0),
+        _published_embedder_meta(),
+    )
+    if refusal:
+        print(f'REFUSING TO PUBLISH — {refusal}', file=sys.stderr)
+        print('The previously published embedder stays in place. A collapsed '
+              'gallery answers with the nearest class it still holds, which '
+              'reads as confident recognition of the wrong item.',
+              file=sys.stderr)
         return False
 
     sha = hashlib.sha256(pt.read_bytes()).hexdigest()[:16]
