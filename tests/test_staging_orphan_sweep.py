@@ -84,13 +84,20 @@ def test_a_row_belonging_to_another_install_does_not_protect_a_crop(apply_merge)
 
 
 def test_data_crops_are_never_swept(apply_merge):
-    """The sweep is about staging. A crop in data/ is the dataset."""
+    """The sweep is about staging. A crop in data/ is the dataset.
+
+    Asserted as "no `data/` path is deleted" rather than "nothing is deleted".
+    The two were the same until rows whose crop exists nowhere became
+    sweepable, and this fixture's row is one: it names `bb`, which has no PNG
+    in staging and no entry in data/. Deleting its staging annotations file is
+    correct; the claim this test defends is about `data/`.
+    """
     api = apply_merge(
         repo_files=[ANN, 'data/crops/ab/aa.png'],
         staging_records={'iid': [_row('bb')]},
     )
 
-    assert api.deleted == []
+    assert [p for p in api.deleted if p.startswith('data/')] == []
 
 
 def test_a_crop_promoted_in_this_batch_is_deleted_once(apply_merge):

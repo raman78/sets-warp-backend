@@ -418,6 +418,47 @@ def _commit_in_stages(api, crop_ops: list, anno_op, drain_ops: list,
                        chunk=chunk, label=label, validate=False)
 
 
+def _surviving_rows(
+    records:       dict[str, list[dict]],
+    staged_shas:   set[str],
+    existing:      dict[str, dict],
+    safe_promoted: set[str],
+    barred:        set[str],
+) -> dict[str, list[dict]]:
+    """The staging rows worth keeping, per install.
+
+    A row is dropped when the tally can never act on it again. Four ways that
+    happens, and only the first was handled before:
+
+    * promoted this run       — it has done its job and is drained
+    * crop exists nowhere     — tallying reads the PNG's bytes, so a row with
+                                no PNG in staging and none in `data/` can
+                                never be promoted. The mirror of the orphan
+                                PNG swept further down, and the direction that
+                                had no sweep.
+    * barred by the ledger    — the maintainer rejected the crop. The tally
+                                skips it, so nothing else would remove its
+                                staging copy: the rejection would be
+                                re-litigated on every run, for good.
+    * no sha at all           — a reference to nothing.
+
+    Everything else survives, including an ordinary single vote waiting for
+    company. Dropping one of those would silently discard a contribution,
+    which is worse than any residue this sweeps.
+    """
+    out: dict[str, list[dict]] = {}
+    for iid, rows in records.items():
+        kept = []
+        for rec in rows:
+            sha = (rec.get('crop_sha256') or '').strip()
+            if not sha or sha in barred or sha in safe_promoted:
+                continue
+            if sha in staged_shas or sha in existing:
+                kept.append(rec)
+        out[iid] = kept
+    return out
+
+
 def _apply(
     api, token: str,
     merged:    dict[str, dict],
@@ -427,6 +468,7 @@ def _apply(
     repo_files: set[str],
     contributors_for_sha: dict[str, set[str]],
     staging_records: dict[str, list[dict]],
+    rejected: set[str] | None = None,
     chunk: int = COMMIT_CHUNK,
 ):
     """Rewrite data/annotations.jsonl, copy approved crops, then drain
@@ -501,9 +543,30 @@ def _apply(
                 ops_drain.append(CommitOperationDelete(path_in_repo=staging_png))
                 deleted_crops += 1
 
+    # A row whose crop exists nowhere — not in staging, not in data/ — is the
+    # mirror of the orphan swept below, and until now only that one direction
+    # was covered. It can never be tallied, because tallying reads the PNG's
+    # bytes, so it would sit in `staging/<iid>/annotations.jsonl` for good.
+    # Two were there when this was written.
+    #
+    # Uploads write the rows and the PNGs in one commit, so a row can only
+    # reach this state through a partial write or an out-of-band edit; either
+    # way what is left is a reference to nothing.
+    staged_shas = {Path(p).stem for p in repo_files
+                   if p.startswith('staging/') and '/crops/' in p
+                   and p.endswith('.png')}
+    barred = set(rejected or ())
+    surviving = _surviving_rows(staging_records, staged_shas, existing,
+                                safe_promoted, barred)
+
     for iid, records in staging_records.items():
-        kept = [r for r in records
-                if (r.get('crop_sha256') or '').strip() not in safe_promoted]
+        kept = surviving[iid]
+        dangling = len(records) - len(kept) - sum(
+            1 for r in records
+            if (r.get('crop_sha256') or '').strip() in safe_promoted)
+        if dangling:
+            print(f'Sweeping {dangling} staging row(s) for {iid[:8]} the '
+                  f'tally can never reach.')
         if len(kept) == len(records):
             continue
         staging_ann = f'staging/{iid}/annotations.jsonl'
@@ -550,7 +613,9 @@ def _apply(
             continue
         parts = path.split('/')
         iid, sha = parts[1], Path(parts[-1]).stem
-        if iid in kept_by_iid:
+        if sha in barred:
+            orphan = True
+        elif iid in kept_by_iid:
             orphan = sha not in kept_by_iid[iid]
         else:
             # No annotations.jsonl for this install at all. Uploads write the
@@ -660,11 +725,24 @@ def main() -> int:
                  if p.startswith('staging/') and p.endswith('/annotations.jsonl')}
     _voted = {(r.get('crop_sha256') or '').strip()
               for recs in staging_records.values() for r in recs}
+    _staged_shas = {Path(p).stem for p in repo_files
+                    if p.startswith('staging/') and '/crops/' in p
+                    and p.endswith('.png')}
+    # Three ways a staging file can be unreachable by the tally, and each
+    # leaves it in place unless the sweep runs: no row refers to the PNG, the
+    # install has no annotations file at all, or the sha is barred by the
+    # review ledger. The mirror case — a row whose PNG exists nowhere — has
+    # no PNG to find here, so it is looked for in the rows instead.
     _sweepable = any(
         p.startswith('staging/') and '/crops/' in p and p.endswith('.png')
         and (Path(p).stem not in _voted
-             or p.split('/')[1] not in _ann_iids)
+             or p.split('/')[1] not in _ann_iids
+             or Path(p).stem in rejected)
         for p in repo_files
+    ) or any(
+        (r.get('crop_sha256') or '').strip() not in _staged_shas
+        and (r.get('crop_sha256') or '').strip() not in existing
+        for recs in staging_records.values() for r in recs
     )
     if not name_votes and not _sweepable:
         print('No staging entries to merge — nothing to do.')
@@ -714,7 +792,7 @@ def main() -> int:
 
     _apply(api, args.token, merged, promoted_shas, existing, crop_src,
            repo_files, contributors_for_sha, staging_records,
-           chunk=args.chunk)
+           rejected=rejected, chunk=args.chunk)
     print('OK — committed.')
     return 0
 

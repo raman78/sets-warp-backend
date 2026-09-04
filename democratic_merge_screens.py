@@ -197,6 +197,7 @@ def _collect_votes(token: str) -> tuple[
     dict[str, dict[str, str]],                       # screen_src[sha]   → {iid: staging_path}
     dict[str, Counter],                              # text_votes[ml]    → {name: count}
     int,                                              # rejected_text votes
+    list[str],                                        # staging paths that can never merge
 ]:
     """Single shallow clone, two passes — one for screen_types PNGs,
     one for annotations.jsonl text rows."""
@@ -207,11 +208,12 @@ def _collect_votes(token: str) -> tuple[
     root = Path(snap_dir) / 'staging'
     if not root.exists():
         print(f'WARNING: no staging/ folder at {root}')
-        return {}, {}, {}, 0
+        return {}, {}, {}, 0, []
 
     # ── (a) Screen-type votes ────────────────────────────────────────────
     screen_votes: dict[str, Counter] = defaultdict(Counter)
     screen_src:   dict[str, dict[str, str]] = defaultdict(dict)
+    unpromotable: list[str] = []
 
     for png in root.glob('*/screen_types/*/*.png'):
         try:
@@ -221,6 +223,15 @@ def _collect_votes(token: str) -> tuple[
         except Exception:
             continue
         if stype not in SCREEN_TYPES:
+            # Can never be promoted, so it can never be drained by the
+            # promotion path either — it would sit in staging forever. The
+            # live case is `UNKNOWN`, the client's not-yet-classified
+            # sentinel: it stopped being uploaded on 2026-08-13 and the
+            # endpoint refuses it, but what arrived before that is still
+            # there. Collected here and swept below rather than left for a
+            # manual cleanup.
+            unpromotable.append(
+                f'staging/{install_id}/screen_types/{stype}/{sha}.png')
             continue
         # 1 vote per (install_id, sha). Re-uploads from the same install
         # do not stack — Counter.update is what `defaultdict(Counter)`
@@ -264,7 +275,7 @@ def _collect_votes(token: str) -> tuple[
         except Exception as e:
             print(f'  SKIP text votes from {install_id}: {e}')
 
-    return screen_votes, screen_src, text_votes, rejected
+    return screen_votes, screen_src, text_votes, rejected, unpromotable
 
 
 # ── voting ───────────────────────────────────────────────────────────────
@@ -402,6 +413,27 @@ def _merge_text(
 
 
 # ── apply ────────────────────────────────────────────────────────────────
+
+def _sweep_unpromotable(paths: list[str], token: str) -> None:
+    """Delete staging screens whose type the merger will never accept.
+
+    Kept apart from the promotion drain because it answers a different
+    question. The drain removes what has been tallied and applied; this
+    removes what can never be tallied at all, which the drain by construction
+    never reaches. Both exist so staging returns to empty on its own — a
+    residue that only a hand-run script can clear is one nobody clears.
+
+    Nothing is merged here, so there is nothing to add — deletes only.
+    """
+    from huggingface_hub import CommitOperationDelete, HfApi
+
+    api = HfApi(token=token)
+    ops = [CommitOperationDelete(path_in_repo=p) for p in sorted(set(paths))]
+    commit_adds_then_deletes(
+        api, REPO, RTYPE, ops,
+        f'democratic_merge: sweep {len(ops)} unpromotable staging screen(s)')
+    print(f'  swept {len(ops)} file(s) from staging')
+
 
 def _apply(
     api, token: str,
@@ -561,12 +593,23 @@ def main() -> int:
     print(f'Existing screens metadata: {len(existing_screens)} sha')
     print(f'Existing text corrections: {len(existing_text)} ml_name')
 
-    screen_votes, screen_src, text_votes, rejected = _collect_votes(args.token)
+    (screen_votes, screen_src, text_votes,
+     rejected, unpromotable) = _collect_votes(args.token)
     print(f'Screen votes: {len(screen_votes)} sha   '
           f'Text votes: {len(text_votes)} ml_name '
           f'({rejected} rejected at ingest)')
 
+    if unpromotable:
+        print(f'Unpromotable staging screens (type not in the whitelist): '
+              f'{len(unpromotable)} — '
+              f'{"sweeping" if args.apply else "would sweep"}')
+
     if not screen_votes and not text_votes:
+        # The sweep still has to run. These entries produce no votes by
+        # definition, so returning here on "nothing to merge" is exactly the
+        # path that left them in place.
+        if unpromotable and args.apply:
+            _sweep_unpromotable(unpromotable, args.token)
         print('Nothing to merge — exiting.')
         return 0
 
