@@ -15,34 +15,75 @@ import json
 import admin_reconcile_local as rec
 
 
-# ── The three states ───────────────────────────────────────────────────────
+# ── Why they differ, not whether ───────────────────────────────────────────
+#
+# The published dataset is the reference. A local store holding a different
+# label is normally the tally working, not a fault — so the split is drawn on
+# whether this install ever *sent* that label, which its own upload cache
+# records. An earlier version of this tool scored both alike and concluded the
+# dataset should be corrected to match one machine.
 
 def test_a_matching_pair_is_not_reported():
-    v = rec.compare({'aa': 'BOFFS'}, {'aa': 'BOFFS'})
+    v = rec.compare({'aa': 'BOFFS'}, {'aa': 'BOFFS'}, {'aa': 'BOFFS'})
 
-    assert v == {'missing': [], 'mislabelled': [], 'withdrawn': []}
-
-
-def test_something_confirmed_here_and_absent_there_is_missing():
-    v = rec.compare({'aa': 'DISCARD'}, {})
-
-    assert v['missing'] == ['aa']
+    assert v == {'unsent': [], 'outvoted': [], 'absent': []}
 
 
-def test_a_different_label_is_reported_with_both_sides():
-    """The fault this exists for: the file was sent, the correction was not,
-    so the dataset holds the first label it was given."""
-    v = rec.compare({'aa': 'SPACE_BOFFS'}, {'aa': 'BOFFS'})
+def test_a_label_never_sent_is_a_transport_fault():
+    """The screen-type bug: the correction stayed on the machine, so the
+    dataset never had the chance to weigh it."""
+    v = rec.compare({'aa': 'SPACE_BOFFS'}, {'aa': 'BOFFS'}, {'aa': 'BOFFS'})
 
-    assert v['mislabelled'] == [('aa', 'SPACE_BOFFS', 'BOFFS')]
-    assert v['missing'] == []
+    assert v['unsent'] == [('aa', 'SPACE_BOFFS')]
+    assert v['outvoted'] == []
 
 
-def test_something_published_but_gone_here_is_withdrawn():
-    """Not a fault on its own — a maintainer rejection removes it here."""
-    v = rec.compare({}, {'aa': 'BOFFS'})
+def test_a_label_that_was_sent_and_lost_is_not_a_fault():
+    """The tally weighed it and other contributors disagreed. Reported for
+    review, never scored as an error."""
+    v = rec.compare({'aa': 'SPACE_BOFFS'}, {'aa': 'BOFFS'}, {'aa': 'SPACE_BOFFS'})
 
-    assert v['withdrawn'] == ['aa']
+    assert v['outvoted'] == [('aa', 'SPACE_BOFFS', 'BOFFS')]
+    assert v['unsent'] == []
+
+
+def test_something_never_sent_and_absent_there_is_unsent():
+    v = rec.compare({'aa': 'DISCARD'}, {}, {})
+
+    assert v['unsent'] == [('aa', 'DISCARD')]
+
+
+def test_something_sent_and_then_dropped_is_not_a_transport_fault():
+    """Sent, accepted, and later removed — a maintainer rejection reads this
+    way and is legitimate."""
+    v = rec.compare({'aa': 'DISCARD'}, {}, {'aa': 'DISCARD'})
+
+    assert v['unsent'] == []
+    assert v['outvoted'] == [('aa', 'DISCARD', '<dropped>')]
+
+
+def test_something_in_the_dataset_and_not_here_is_absent():
+    v = rec.compare({}, {'aa': 'BOFFS'}, {})
+
+    assert v['absent'] == ['aa']
+
+
+def test_a_legacy_cache_cannot_support_an_outvoted_claim(tmp_path):
+    """The screen cache was a bare list of shas and recorded no label, so
+    nothing in it proves which label was sent."""
+    (tmp_path / '.sync_uploaded_screen_hashes.json').write_text(
+        json.dumps(['aa']), encoding='utf-8')
+
+    sent = rec.sent_labels(tmp_path, 'screens')
+
+    assert sent == {'aa': ''}
+    assert rec.compare({'aa': 'BOFFS'}, {'aa': 'TRAITS'}, sent)['unsent']
+
+
+def test_a_missing_cache_leaves_everything_unproven(tmp_path):
+    """No cache means no claim can be made about what was sent, so a
+    difference falls back to the fault reading rather than being excused."""
+    assert rec.sent_labels(tmp_path, 'crops') == {}
 
 
 # ── Reading each side ──────────────────────────────────────────────────────
