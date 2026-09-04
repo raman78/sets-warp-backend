@@ -253,6 +253,14 @@ def _name_resolves_nowhere(name: str, slot: str, vocab: dict[str, set[str]]) -> 
     this hunts, so a real item sitting in a text slot should not be reported
     as an unresolvable name.
     """
+    # The virtual classes are labels in their own right — the embedder needs
+    # them as gallery classes, and this tool defines them a few lines up. No
+    # cargo table carries them, so an item-name check refuses them and the
+    # commonest correction there is, a blank cell filed under an item's name,
+    # could not be applied at all.
+    if name in VIRTUAL_LABELS:
+        return False
+
     slot = (slot or '').strip()
     if slot.startswith(('ship_tier', 'Ship Tier')):
         pool = vocab['tiers'] | vocab['items']

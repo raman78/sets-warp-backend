@@ -157,3 +157,26 @@ def test_a_ship_that_is_neither_is_still_flagged(ship_vocab):
 def test_a_row_with_no_display_name_still_contributes_its_title(ship_vocab):
     assert not tool._name_resolves_nowhere(
         'Some Ship With No Display Name', 'Ship Type', ship_vocab)
+
+
+# ── The virtual classes are labels, not unresolvable names ─────────────────
+#
+# `__empty__` / `__inactive__` are gallery classes the embedder needs, and no
+# cargo table carries them. An item-name check refuses them, which would have
+# made the commonest correction of all — a blank cell filed under an item's
+# name — impossible to apply: the RELABEL guard aborts the whole commit on a
+# target it cannot resolve.
+
+def test_a_virtual_label_is_an_acceptable_target():
+    for v in ('__empty__', '__inactive__'):
+        assert not _nowhere(v, 'Boff Science')
+        assert not _nowhere(v, 'Tactical Consoles')
+
+
+def test_a_virtual_label_is_acceptable_in_a_text_slot_too():
+    assert not _nowhere('__empty__', 'Ship Type')
+
+
+def test_an_invented_dunder_name_is_still_refused():
+    """Accepting the two known classes must not accept anything shaped alike."""
+    assert _nowhere('__nonsense__', 'Boff Science')
