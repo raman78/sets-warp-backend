@@ -12,6 +12,8 @@ Run standalone:
 """
 from __future__ import annotations
 
+import pytest
+
 import admin_reject_crops as tool
 
 
@@ -85,3 +87,73 @@ def test_nothing_is_flagged_when_the_vocabulary_could_not_be_loaded():
 
     assert not tool._name_resolves_nowhere('anything at all', 'Devices', empty)
     assert not tool._name_resolves_nowhere('anything at all', 'Ship Type', empty)
+
+
+# ── A ship has two names, and the game prints the other one ────────────────
+#
+# `cargo.ships()` is keyed on `Page`, the wiki article title. A `Ship Type`
+# crop is OCR of what the game prints, which is the row's `name`, and the two
+# differ for 84 of the 797 ships. Checking against article titles alone flags
+# every one of those as unresolvable — the same wrong-vocabulary mistake as
+# checking a ship name against the item cargo, one level further in.
+
+SHIP_ROWS = {
+    # Page (the wiki article title)          row as cargo returns it
+    'Galaxy Exploration Cruiser Retrofit': {'name': 'Exploration Cruiser Retrofit'},
+    'Fleet Yamaguchi Support Cruiser':     {'name': 'Fleet Yamaguchi Support Cruiser'},
+    'Some Ship With No Display Name':      {},
+}
+
+
+@pytest.fixture
+def ship_vocab(monkeypatch):
+    """The real `load_vocabularies`, with cargo's ship rows stubbed.
+
+    Driving the actual function matters here: building the same set inside
+    the test would pass whether or not the source still does it, which is
+    worse than no test.
+
+    `warp` is not installed in this venv — the tool reaches the sibling
+    checkout through `sys.path` at call time — so the stub is injected as the
+    module rather than patched onto an import. That also keeps the test from
+    depending on whether some earlier test happened to put sto-warp on the
+    path first, which it silently did before.
+    """
+    import sys, types
+
+    cargo = types.ModuleType('warp.data.cargo')
+    cargo.ships = lambda: dict(SHIP_ROWS)
+    pkg_warp = types.ModuleType('warp')
+    pkg_data = types.ModuleType('warp.data')
+    pkg_data.cargo = cargo
+    pkg_warp.data = pkg_data
+    for name, mod in (('warp', pkg_warp), ('warp.data', pkg_data),
+                      ('warp.data.cargo', cargo)):
+        monkeypatch.setitem(sys.modules, name, mod)
+
+    monkeypatch.setattr(tool, 'load_canonical_names', lambda: {'Some Item'})
+    return tool.load_vocabularies()
+
+
+def test_the_in_game_name_is_accepted(ship_vocab):
+    """The label OCR actually produces — `ships()` is keyed on the article
+    title, and the two differ for 84 of the 797 ships."""
+    assert not tool._name_resolves_nowhere(
+        'Exploration Cruiser Retrofit', 'Ship Type', ship_vocab)
+
+
+def test_the_wiki_article_title_is_still_accepted(ship_vocab):
+    """Older labels were written under the article title; both must resolve."""
+    assert not tool._name_resolves_nowhere(
+        'Galaxy Exploration Cruiser Retrofit', 'Ship Type', ship_vocab)
+
+
+def test_a_ship_that_is_neither_is_still_flagged(ship_vocab):
+    """Widening to two names must not widen to anything."""
+    assert tool._name_resolves_nowhere(
+        'Exploration Cruiser Refit', 'Ship Type', ship_vocab)
+
+
+def test_a_row_with_no_display_name_still_contributes_its_title(ship_vocab):
+    assert not tool._name_resolves_nowhere(
+        'Some Ship With No Display Name', 'Ship Type', ship_vocab)

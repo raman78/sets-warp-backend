@@ -226,7 +226,19 @@ def load_vocabularies() -> dict[str, set[str]]:
                                   'tiers': set(_SHIP_TIER_VALUES)}
     try:
         from warp.data.cargo import ships
-        vocab['ships'] = set(ships().keys())
+        # Both names each ship has, because a `Ship Type` crop is OCR of what
+        # the *game* prints. `ships()` is keyed on `Page`, the wiki article
+        # title, and the two differ for 84 of the 797 ships — the Galaxy
+        # Retrofit's article is `Galaxy Exploration Cruiser Retrofit` while
+        # the game shows `Exploration Cruiser Retrofit`. Keying the check on
+        # the article title alone flags every one of those as unresolvable,
+        # and worse, makes the RELABEL guard refuse a correction to the name
+        # the ship actually displays.
+        rows = ships()
+        vocab['ships'] = set(rows.keys()) | {
+            (r.get('name') or '').strip()
+            for r in rows.values() if isinstance(r, dict) and r.get('name')
+        }
     except Exception as e:
         print(f'WARNING: ship list unavailable ({e}) — ship-name labels '
               f'will not be checked.', file=sys.stderr)
