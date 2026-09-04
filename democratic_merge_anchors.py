@@ -84,6 +84,11 @@ DATA_DIR = 'data/anchors'
 # rest float-rounded to 5 decimals (matches the original
 # build_community_anchors precision).
 _COORD_KEYS = ('x0_rel', 'y_rel', 'w_rel', 'h_rel', 'step_rel')
+# Coordinates that belong to the slot's row rather than to one horizontal run.
+# A multi-run BOFF slot carries only these at the slot level; its x origins,
+# steps and counts live per run, which is why they are aggregated separately.
+_ROW_KEYS  = ('y_rel', 'w_rel', 'h_rel')
+_RUN_KEYS  = ('x0_rel', 'step_rel')
 
 
 def _grid_key(build_type: str, aspect: float | None) -> tuple[str, float] | None:
@@ -193,6 +198,78 @@ def _collect_votes(
     return groups, group_res, group_iids, staging_index
 
 
+def _as_runs(geo: dict) -> list[dict]:
+    """Every slot geometry as a list of horizontal runs.
+
+    A flat slot is one run; a multi-run slot (BOFF abilities split across
+    several columns of the panel) is many. Normalising both to the same shape
+    here mirrors what the client already does when it reads a merged grid, so
+    the two sides agree on what a slot means.
+    """
+    runs = geo.get('runs')
+    if isinstance(runs, list) and runs:
+        return [r for r in runs if isinstance(r, dict)]
+    if 'x0_rel' in geo:
+        return [{k: geo[k] for k in ('x0_rel', 'step_rel', 'count') if k in geo}]
+    return []
+
+
+def _aggregate_runs(geos: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Median-aggregate one slot's runs across every grid that defined it.
+
+    Runs are matched by position in the list, which is what the contributing
+    grids agree on: they are in the same (build_type, aspect_bucket) group, so
+    they describe the same panel and emit its columns in the same left-to-right
+    order. How many runs the slot has is itself decided by median, so one
+    contributor that split a row differently cannot add or remove a column.
+
+    Returns (runs, spread, declared), where `declared` is the median number of
+    runs the contributors described. The caller picks the emitted shape from
+    that rather than from how many survived: a slot the panel really splits
+    across columns stays multi-run even if one run was unusable, because the
+    flat shape means something different to the client — it sizes the row from
+    the ship's profile instead of from the stored count.
+
+    An empty run list means no run carried an x origin, and the caller drops
+    the slot.
+    """
+    per_grid = [_as_runs(g) for g in geos]
+    per_grid = [r for r in per_grid if r]
+    if not per_grid:
+        return [], [], 0
+
+    n_runs = int(round(statistics.median([len(r) for r in per_grid])))
+    out: list[dict] = []
+    spread: list[dict] = []
+    for i in range(max(1, n_runs)):
+        present = [r[i] for r in per_grid if len(r) > i]
+        if not present:
+            break
+        run: dict = {}
+        run_spread: dict = {}
+        for key in _RUN_KEYS:
+            vals = [float(r[key]) for r in present
+                    if key in r and isinstance(r[key], (int, float))]
+            if not vals:
+                continue
+            run[key] = round(statistics.median(vals), 5)
+            run_spread[key] = {
+                'min':    round(min(vals), 5),
+                'max':    round(max(vals), 5),
+                'stddev': round(statistics.pstdev(vals), 5) if len(vals) > 1 else 0.0,
+                'n':      len(vals),
+            }
+        counts = [int(r['count']) for r in present
+                  if 'count' in r and isinstance(r['count'], (int, float))]
+        if counts:
+            run['count'] = int(round(statistics.median(counts)))
+        # A run without an x origin cannot place an icon.
+        if 'x0_rel' in run:
+            out.append(run)
+            spread.append(run_spread)
+    return out, spread, max(1, n_runs)
+
+
 def _aggregate_group(
     contributors: dict[str, list[dict]],
     resolutions:  list[str],
@@ -222,7 +299,7 @@ def _aggregate_group(
             continue
         entry: dict = {}
         slot_spread: dict = {}
-        for key in _COORD_KEYS:
+        for key in _ROW_KEYS:
             vals = [float(g[key]) for g in geos
                     if key in g and isinstance(g[key], (int, float))]
             if not vals:
@@ -234,13 +311,24 @@ def _aggregate_group(
                 'stddev': round(statistics.pstdev(vals), 5) if len(vals) > 1 else 0.0,
                 'n':      len(vals),
             }
-        counts = [int(g['count']) for g in geos
-                  if 'count' in g and isinstance(g['count'], (int, float))]
-        if counts:
-            entry['count'] = int(round(statistics.median(counts)))
-        # A slot is only emitted when the four mandatory coords survived
-        # — otherwise the median dropped one and the slot is unusable.
-        if all(k in entry for k in ('x0_rel', 'y_rel', 'w_rel', 'h_rel')):
+
+        runs, run_spread, declared_runs = _aggregate_runs(geos)
+        if runs:
+            if declared_runs == 1:
+                # Emit the flat shape for a single run. It is not merely
+                # equivalent: the client's flat branch sizes the row from the
+                # ship's profile, while its `runs` branch takes the stored
+                # count as authoritative. Writing `runs` for what has always
+                # been flat would silently stop honouring the profile.
+                entry.update(runs[0])
+            else:
+                entry['runs'] = runs
+            slot_spread['runs'] = run_spread
+
+        # A slot is only emitted when the mandatory row coords survived and at
+        # least one run has an x origin — otherwise the median dropped one and
+        # the slot is unusable.
+        if all(k in entry for k in ('y_rel', 'w_rel', 'h_rel')) and runs:
             aggregated[slot] = entry
             spread[slot]     = slot_spread
 
