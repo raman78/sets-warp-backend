@@ -33,7 +33,7 @@ SHA = 'a' * 64
 
 def _merge(name_votes, slot_votes, existing=None):
     return merge._merge(name_votes, slot_votes, existing or {},
-                        verbose=False, rejected=set())
+                        verbose=False)
 
 
 # ── The production case ────────────────────────────────────────────────────

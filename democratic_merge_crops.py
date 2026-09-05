@@ -113,26 +113,27 @@ def _is_poison_name(name: str) -> bool:
     return name.startswith('__') or name == 'Test Item Name'
 
 
-def _load_rejected_shas(snap_dir) -> set[str]:
-    """Return the set of crop_sha256 the maintainer marked REJECT in the
-    review ledger (data/reviewed_virtual.jsonl). These are permanently barred
-    from data/ — re-uploads must not resurrect them. Missing ledger = empty."""
-    out: set[str] = set()
-    local = Path(snap_dir) / LEDGER
-    if not local.exists():
-        return out
-    with open(local, encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                d = json.loads(line)
-            except Exception:
-                continue
-            if d.get('decision') == 'REJECT' and d.get('crop_sha256'):
-                out.add(d['crop_sha256'])
-    return out
+# A REJECT used to bar its crop_sha256 from `data/` for good: the tally
+# skipped the vote and the merge dropped the record, whatever a later upload
+# said. That conflated two different statements, the same way the name and
+# slot ballots did before they were split.
+#
+# "This sample is bad" is not "this picture is banned". The rejection is keyed
+# on the *picture*, and a picture is not a claim — the claim is the picture
+# plus the label plus the slot. Rejecting a class line filed as a `Ship Tier`
+# also barred that class line from ever being contributed as a `Ship Type`,
+# which is a good sample and often the only copy.
+#
+# So a REJECT now means what it says and no more: the sample is removed as
+# though it had never been submitted. `admin_reject_crops.apply` deletes the
+# record, deletes the crop PNG and drains the staging copies, so nothing is
+# left to re-tally. If someone confirms that picture again afterwards, that is
+# fresh human input and is counted like any other — a maintainer's judgement
+# about one sample is not a permanent verdict on a photograph.
+#
+# The ledger keeps every decision, so the review tool still never re-surfaces
+# a crop somebody has already looked at, and a name a maintainer corrected is
+# still pinned by `_load_relabelled`.
 
 
 def _load_relabelled(snap_dir) -> dict[str, str]:
@@ -195,7 +196,6 @@ def _load_existing(snap_dir) -> dict[str, dict]:
 
 def _collect_votes(
     snap_dir, since: str | None, repo_files: set[str],
-    rejected: set[str] | None = None,
 ) -> tuple[
     dict[str, Counter],
     dict[str, Counter],
@@ -220,7 +220,6 @@ def _collect_votes(
       - staging_records[install_id] → raw annotation dicts kept for the
         staging rewrite (drain trims entries whose sha was promoted)
     """
-    rejected = rejected or set()
     root = Path(snap_dir) / 'staging'
     if not root.exists():
         print(f'WARNING: no staging/ folder at {root}')
@@ -268,9 +267,6 @@ def _collect_votes(
                         if date and date < since:
                             continue
                     if _is_poison_name(name):
-                        continue
-                    if sha in rejected:
-                        # Maintainer-rejected crop re-uploaded: never re-promote.
                         continue
                     # Dedup duplicate uploads from one install: one vote each.
                     key = (sha, name, slot)
@@ -324,7 +320,6 @@ def _merge(
     slot_votes: dict[str, Counter],
     existing:   dict[str, dict],
     verbose:    bool,
-    rejected:   set[str] | None = None,
     relabelled: dict[str, str] | None = None,
 ) -> tuple[dict[str, dict], list[dict], set[str]]:
     """Majority vote. Returns (merged, report_rows, promoted_shas).
@@ -334,15 +329,15 @@ def _merge(
     even when the consensus was already reflected in data/ — those votes
     have done their job and should not be re-tallied next run.
     """
-    # Drop legacy poison entries + maintainer-rejected shas from existing
-    # (one-shot self-heal — keeps data/ clean even if one slipped in).
-    rejected = rejected or set()
+    # Drop legacy poison entries from existing (one-shot self-heal — keeps
+    # data/ clean even if one slipped in). A past REJECT is deliberately not
+    # replayed here: the sample it removed is already gone, and re-dropping
+    # the sha would undo a legitimate later contribution of the same picture.
     merged = {sha: rec for sha, rec in existing.items()
-              if not _is_poison_name((rec.get('name') or ''))
-              and sha not in rejected}
+              if not _is_poison_name((rec.get('name') or ''))}
     dropped_poison = len(existing) - len(merged)
     if dropped_poison:
-        print(f'[clean] dropped {dropped_poison} legacy poison / rejected entries')
+        print(f'[clean] dropped {dropped_poison} legacy poison entries')
 
     # Same self-heal for a correction that was overwritten before the pin
     # existed. Without this the pin only bites on the *next* upload of that
@@ -533,11 +528,10 @@ def _surviving_rows(
     staged_shas:   set[str],
     existing:      dict[str, dict],
     safe_promoted: set[str],
-    barred:        set[str],
 ) -> dict[str, list[dict]]:
     """The staging rows worth keeping, per install.
 
-    A row is dropped when the tally can never act on it again. Four ways that
+    A row is dropped when the tally can never act on it again. Three ways that
     happens, and only the first was handled before:
 
     * promoted this run       — it has done its job and is drained
@@ -546,10 +540,6 @@ def _surviving_rows(
                                 never be promoted. The mirror of the orphan
                                 PNG swept further down, and the direction that
                                 had no sweep.
-    * barred by the ledger    — the maintainer rejected the crop. The tally
-                                skips it, so nothing else would remove its
-                                staging copy: the rejection would be
-                                re-litigated on every run, for good.
     * no sha at all           — a reference to nothing.
 
     Everything else survives, including an ordinary single vote waiting for
@@ -561,7 +551,7 @@ def _surviving_rows(
         kept = []
         for rec in rows:
             sha = (rec.get('crop_sha256') or '').strip()
-            if not sha or sha in barred or sha in safe_promoted:
+            if not sha or sha in safe_promoted:
                 continue
             if sha in staged_shas or sha in existing:
                 kept.append(rec)
@@ -578,7 +568,6 @@ def _apply(
     repo_files: set[str],
     contributors_for_sha: dict[str, set[str]],
     staging_records: dict[str, list[dict]],
-    rejected: set[str] | None = None,
     chunk: int = COMMIT_CHUNK,
 ):
     """Rewrite data/annotations.jsonl, copy approved crops, then drain
@@ -665,9 +654,8 @@ def _apply(
     staged_shas = {Path(p).stem for p in repo_files
                    if p.startswith('staging/') and '/crops/' in p
                    and p.endswith('.png')}
-    barred = set(rejected or ())
     surviving = _surviving_rows(staging_records, staged_shas, existing,
-                                safe_promoted, barred)
+                                safe_promoted)
 
     for iid, records in staging_records.items():
         kept = surviving[iid]
@@ -723,9 +711,7 @@ def _apply(
             continue
         parts = path.split('/')
         iid, sha = parts[1], Path(parts[-1]).stem
-        if sha in barred:
-            orphan = True
-        elif iid in kept_by_iid:
+        if iid in kept_by_iid:
             orphan = sha not in kept_by_iid[iid]
         else:
             # No annotations.jsonl for this install at all. Uploads write the
@@ -817,17 +803,14 @@ def main() -> int:
     existing = _load_existing(snap_dir)
     print(f'Existing data/annotations.jsonl: {len(existing)} entries')
 
-    rejected = _load_rejected_shas(snap_dir)
     relabelled = _load_relabelled(snap_dir)
     if relabelled:
         print(f'Review ledger: {len(relabelled)} sha(s) pinned to a '
               f'maintainer-corrected name')
-    if rejected:
-        print(f'Review ledger: {len(rejected)} rejected sha(s) barred from data/')
 
     (name_votes, slot_votes, crop_src, per_install,
      contributors_for_sha, staging_records) = _collect_votes(
-        snap_dir, since=args.since, repo_files=repo_files, rejected=rejected)
+        snap_dir, since=args.since, repo_files=repo_files)
     print(f'Contributors: {len(per_install)}   '
           f'unique sha hashes voted on: {len(name_votes)}')
 
@@ -842,16 +825,16 @@ def main() -> int:
     _staged_shas = {Path(p).stem for p in repo_files
                     if p.startswith('staging/') and '/crops/' in p
                     and p.endswith('.png')}
-    # Three ways a staging file can be unreachable by the tally, and each
-    # leaves it in place unless the sweep runs: no row refers to the PNG, the
-    # install has no annotations file at all, or the sha is barred by the
-    # review ledger. The mirror case — a row whose PNG exists nowhere — has
-    # no PNG to find here, so it is looked for in the rows instead.
+    # Two ways a staging file can be unreachable by the tally, and each leaves
+    # it in place unless the sweep runs: no row refers to the PNG, or the
+    # install has no annotations file at all. The mirror case — a row whose PNG
+    # exists nowhere — has no PNG to find here, so it is looked for in the rows
+    # instead. (A third, "the sha is barred by the review ledger", went away
+    # with the bar: such a row is now an ordinary vote and is simply tallied.)
     _sweepable = any(
         p.startswith('staging/') and '/crops/' in p and p.endswith('.png')
         and (Path(p).stem not in _voted
-             or p.split('/')[1] not in _ann_iids
-             or Path(p).stem in rejected)
+             or p.split('/')[1] not in _ann_iids)
         for p in repo_files
     ) or any(
         (r.get('crop_sha256') or '').strip() not in _staged_shas
@@ -880,7 +863,7 @@ def main() -> int:
 
     merged, report, promoted_shas = _merge(
         name_votes, slot_votes, existing,
-        verbose=args.verbose, rejected=rejected, relabelled=relabelled)
+        verbose=args.verbose, relabelled=relabelled)
 
     new_count    = sum(1 for r in report if r['action'] == 'NEW')
     update_count = sum(1 for r in report if r['action'] == 'UPDATE')
@@ -914,7 +897,7 @@ def main() -> int:
 
     _apply(api, args.token, merged, promoted_shas, existing, crop_src,
            repo_files, contributors_for_sha, staging_records,
-           rejected=rejected, chunk=args.chunk)
+           chunk=args.chunk)
     print('OK — committed.')
     return 0
 

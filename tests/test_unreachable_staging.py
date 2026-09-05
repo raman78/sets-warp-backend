@@ -11,9 +11,10 @@ would ever have cleared:
      2  annotation rows whose crop exists nowhere — not in staging, not in
         `data/`. The mirror of the orphan PNG the sweep already handled, and
         the only direction it did not cover.
-     4  rows and 2 crops barred by the review ledger. The maintainer rejected
-        them, so the tally skips them, so nothing drains them — the rejection
-        would be re-litigated every run and the files kept for good.
+     4  rows and 2 crops barred by the review ledger. That third class no
+        longer exists: a REJECT removes the sample instead of barring the
+        picture, so such a row is an ordinary vote and drains by being
+        tallied. Kept in this list because it is why the sweep was written.
 
 Run standalone:
     python -m pytest tests/test_unreachable_staging.py -v
@@ -52,7 +53,6 @@ def test_a_row_whose_crop_exists_nowhere_is_swept(monkeypatch):
         staged_shas={'aa'},
         existing={},
         safe_promoted=set(),
-        barred=set(),
     )
 
     assert [r['crop_sha256'] for r in kept['iid']] == ['aa']
@@ -65,22 +65,24 @@ def test_a_row_whose_crop_is_already_in_data_is_kept():
         staged_shas=set(),
         existing={'aa': {'name': 'x'}},
         safe_promoted=set(),
-        barred=set(),
     )
 
     assert [r['crop_sha256'] for r in kept['iid']] == ['aa']
 
 
-def test_a_barred_row_is_swept_rather_than_re_litigated():
+def test_a_rejected_row_is_an_ordinary_vote_again():
+    """A REJECT no longer bars its sha, so a row referring to a
+    previously-rejected crop is not swept — it is simply tallied. The sample
+    the maintainer removed is already gone; a fresh confirmation of the same
+    picture is fresh human input and counts."""
     kept = crops._surviving_rows(
         records=_records('aa', 'bb'),
         staged_shas={'aa', 'bb'},
         existing={},
         safe_promoted=set(),
-        barred={'bb'},
     )
 
-    assert [r['crop_sha256'] for r in kept['iid']] == ['aa']
+    assert [r['crop_sha256'] for r in kept['iid']] == ['aa', 'bb']
 
 
 def test_a_promoted_row_is_still_drained_as_before():
@@ -90,7 +92,6 @@ def test_a_promoted_row_is_still_drained_as_before():
         staged_shas={'aa', 'bb'},
         existing={},
         safe_promoted={'bb'},
-        barred=set(),
     )
 
     assert [r['crop_sha256'] for r in kept['iid']] == ['aa']
@@ -102,7 +103,6 @@ def test_a_row_with_no_sha_at_all_is_swept():
         staged_shas=set(),
         existing={},
         safe_promoted=set(),
-        barred=set(),
     )
 
     assert kept['iid'] == []
@@ -115,7 +115,6 @@ def test_a_healthy_row_survives_every_sweep():
         staged_shas={'aa'},
         existing={},
         safe_promoted=set(),
-        barred=set(),
     )
 
     assert [r['crop_sha256'] for r in kept['iid']] == ['aa']

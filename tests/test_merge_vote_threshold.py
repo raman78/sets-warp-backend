@@ -38,7 +38,7 @@ def _run(name_votes: dict, existing: dict):
     # "slot not stated" bucket, which counts toward whatever the crop is.
     by_slot = {sha: {'': c} for sha, c in name_votes.items()}
     return merge._merge(by_slot, {}, existing,
-                        verbose=False, rejected=set())
+                        verbose=False)
 
 
 def _action(report, sha: str) -> str:

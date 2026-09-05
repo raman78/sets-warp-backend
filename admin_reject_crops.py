@@ -19,13 +19,27 @@ icon is "empty", and the client-side visual guard
 `CommunitySeed: POISON skip`.
 
 This tool surfaces exactly those crops (virtual label + colourful pixels),
-lets the maintainer review each one, and applies a three-way decision:
+lets the maintainer review each one, and applies a four-way decision:
 
     KEEP           the label is correct — a real dim slot that just happens
                    to trip the heuristic; recorded so it is never re-surfaced.
     REJECT         drop it entirely — bad training data, unidentifiable.
+                   Note this is **permanent**: the sha is barred and a later
+                   re-upload of the same picture can never be promoted, so it
+                   is the wrong tool for a crop that is merely mis-filed.
     RELABEL <name> same crop bytes (same sha), fix the `name` to the real
                    item so the poison becomes useful training data.
+    SLOT <slot>    same crop, same name, wrong *slot*. Nothing is deleted and
+                   nothing is barred.
+
+`SLOT` exists because of a defect that is now fixed upstream but left records
+behind. When no tier badge was found on screen, the client gave the `Ship
+Tier` row the same bounding box as the `Ship Type` row; identical pixels give
+an identical hash, so both rows landed in one ballot and a record could end up
+with a class line's picture, the class's name, and `slot: Ship Tier`.
+Rejecting such a record would throw away a perfectly good picture of a ship's
+class line — often the only copy — and bar it for good. Only one field is
+wrong, so only one field is changed.
 
 A per-crop review ledger (`data/reviewed_virtual.jsonl`) records every
 decision so re-scans (and the cron audit / GUI dashboard) only ever show
@@ -627,7 +641,13 @@ def write_decisions_tsv(candidates: list[dict], out_path: Path) -> None:
 
 
 def read_decisions_tsv(path: Path) -> list[dict]:
-    """Parse the edited TSV → [{sha, decision, relabel_name}]."""
+    """Parse the edited TSV → [{sha, decision, relabel_name, new_slot}].
+
+    `RELABEL <name>` and `SLOT <slot>` both take an argument after the verb;
+    the argument is required, and a verb without one is skipped with a warning
+    rather than applied as a bare decision — an empty relabel used to be the
+    difference between "fix the name" and "confirm the wrong one".
+    """
     decisions: list[dict] = []
     for line in path.read_text(encoding='utf-8').splitlines():
         line = line.rstrip('\n')
@@ -642,14 +662,19 @@ def read_decisions_tsv(path: Path) -> list[dict]:
             continue
         tok = raw.split(None, 1)
         verb = tok[0].upper()
-        relabel_name = tok[1].strip() if verb == 'RELABEL' and len(tok) > 1 else ''
-        if verb not in ('REJECT', 'KEEP', 'RELABEL'):
+        arg = tok[1].strip() if len(tok) > 1 else ''
+        if verb not in ('REJECT', 'KEEP', 'RELABEL', 'SLOT'):
             print(f'  WARN: unknown decision {raw!r} for {sha[:10]} — skipping row')
             continue
-        if verb == 'RELABEL' and not relabel_name:
-            print(f'  WARN: RELABEL without a name for {sha[:10]} — skipping row')
+        if verb in ('RELABEL', 'SLOT') and not arg:
+            print(f'  WARN: {verb} without a value for {sha[:10]} — skipping row')
             continue
-        decisions.append({'sha': sha, 'decision': verb, 'relabel_name': relabel_name})
+        decisions.append({
+            'sha': sha,
+            'decision': verb,
+            'relabel_name': arg if verb == 'RELABEL' else '',
+            'new_slot': arg if verb == 'SLOT' else '',
+        })
     return decisions
 
 
@@ -671,7 +696,34 @@ def apply(snap_dir: Path, decisions: list[dict], api, repo_files: set[str],
     reject = {s for s, d in by_sha.items() if d['decision'] == 'REJECT'}
     relabel = {s: d['relabel_name'] for s, d in by_sha.items()
                if d['decision'] == 'RELABEL'}
+    reslot = {s: d.get('new_slot', '') for s, d in by_sha.items()
+              if d['decision'] == 'SLOT'}
     keep = {s for s, d in by_sha.items() if d['decision'] == 'KEEP'}
+
+    # Guard: the new slot must be one the dataset already uses, and the
+    # record's existing name must be valid under it. The first check catches a
+    # typo (`Ship Typ`) without needing a hard-coded slot list to drift out of
+    # date; the second catches a slot that is spelled fine and wrong anyway —
+    # moving a ship's name to `Fore Weapons` leaves a name no vocabulary for
+    # that slot can resolve.
+    if reslot:
+        known_slots = {(r.get('slot') or '').strip()
+                       for r in data.values() if (r.get('slot') or '').strip()}
+        vocab = load_vocabularies()
+        bad: dict[str, str] = {}
+        for s, new_slot in reslot.items():
+            rec = data.get(s) or {}
+            if new_slot not in known_slots:
+                bad[s] = f'{new_slot!r} is not a slot this dataset uses'
+            elif _name_resolves_nowhere(rec.get('name') or '', new_slot, vocab):
+                bad[s] = (f'{(rec.get("name") or "")!r} does not resolve '
+                          f'under {new_slot!r}')
+        if bad:
+            print('ERROR: SLOT change(s) refused — aborting (no commit):',
+                  file=sys.stderr)
+            for s, why in bad.items():
+                print(f'  {s[:12]}  {why}', file=sys.stderr)
+            return False
 
     # Guard: RELABEL names must exist in the vocabulary the crop's slot
     # allows. Refuse the whole commit otherwise — never write a hand-typed or
@@ -703,7 +755,9 @@ def apply(snap_dir: Path, decisions: list[dict], api, repo_files: set[str],
         print(f'  WARN: {len(unknown)} decided sha not in data/annotations.jsonl '
               f'(already gone?) — ignored')
 
-    # 1. Rewrite data/annotations.jsonl: drop REJECT, apply RELABEL name.
+    # 1. Rewrite data/annotations.jsonl: drop REJECT, apply RELABEL name,
+    #    apply SLOT. A SLOT change touches one field — the crop, its name and
+    #    its votes all stay, because only the filing was wrong.
     new_data: dict[str, dict] = {}
     for sha, rec in data.items():
         if sha in reject:
@@ -712,6 +766,10 @@ def apply(snap_dir: Path, decisions: list[dict], api, repo_files: set[str],
             rec = dict(rec)
             rec['name'] = relabel[sha]
             rec['relabeled_at'] = _now_iso()
+        if sha in reslot:
+            rec = dict(rec)
+            rec['slot'] = reslot[sha]
+            rec['reslotted_at'] = _now_iso()
         new_data[sha] = rec
     ann_payload = ('\n'.join(json.dumps(new_data[s], ensure_ascii=False)
                              for s in sorted(new_data)) + '\n').encode('utf-8')
@@ -738,15 +796,31 @@ def apply(snap_dir: Path, decisions: list[dict], api, repo_files: set[str],
                 drained += 1
 
     # 4. Append every decision to the review ledger (append-only, last wins).
+    #
+    # A SLOT decision must not erase a name pin. The ledger is keyed by sha and
+    # the last entry wins, and `democratic_merge_crops._load_relabelled` only
+    # honours entries whose `decision` is RELABEL — so writing `decision:
+    # 'SLOT'` over a prior RELABEL would quietly unpin the name and let the
+    # next client vote overwrite a correction a human had already made. The
+    # slot change is recorded as a field alongside the prior verdict instead.
     ledger = _load_ledger(snap_dir)
     for sha, d in by_sha.items():
-        ledger[sha] = {
+        prior = ledger.get(sha) or {}
+        entry = {
             'crop_sha256': sha,
             'name':        (relabel.get(sha) if sha in relabel
-                            else (data.get(sha, {}).get('name') or '')),
+                            else (prior.get('name')
+                                  or data.get(sha, {}).get('name') or '')),
             'decision':    d['decision'],
             'reviewed_at': _now_iso(),
         }
+        if d['decision'] == 'SLOT':
+            entry['slot'] = reslot[sha]
+            if prior.get('decision') == 'RELABEL':
+                entry['decision'] = 'RELABEL'
+        elif prior.get('slot'):
+            entry['slot'] = prior['slot']
+        ledger[sha] = entry
     ledger_payload = ('\n'.join(json.dumps(ledger[s], ensure_ascii=False)
                                 for s in sorted(ledger)) + '\n').encode('utf-8')
     ops.append(CommitOperationAdd(path_in_repo=LEDGER,

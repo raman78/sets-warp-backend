@@ -29,7 +29,7 @@ def _run(votes: dict, existing: dict | None = None, pinned: dict | None = None):
     # 'Devices', so these votes are cast under that slot.
     merged, report, _ = merge._merge(
         {SHA: {'Devices': Counter(votes)}}, {SHA: Counter({'Devices': 1})},
-        existing or {}, verbose=False, rejected=set(), relabelled=pinned or {},
+        existing or {}, verbose=False, relabelled=pinned or {},
     )
     return merged.get(SHA, {})
 
@@ -145,7 +145,7 @@ def test_an_overwritten_correction_is_restored_without_a_new_vote():
                       'slot': 'Ship Type', 'votes': 1}}
 
     merged, _, _ = merge._merge(
-        {}, {}, existing, verbose=False, rejected=set(),
+        {}, {}, existing, verbose=False,
         relabelled={SHA: 'Fleet Yamaguchi Support Cruiser'})
 
     assert merged[SHA]['name'] == 'Fleet Yamaguchi Support Cruiser'
@@ -157,7 +157,7 @@ def test_an_entry_already_carrying_the_pinned_name_is_left_alone():
     existing = {SHA: {'crop_sha256': SHA, 'name': 'Right Name', 'votes': 3}}
 
     merged, _, _ = merge._merge(
-        {}, {}, existing, verbose=False, rejected=set(),
+        {}, {}, existing, verbose=False,
         relabelled={SHA: 'Right Name'})
 
     assert merged[SHA] == existing[SHA]
@@ -166,7 +166,7 @@ def test_an_entry_already_carrying_the_pinned_name_is_left_alone():
 def test_the_heal_does_not_invent_entries_for_absent_crops():
     """A ledger row for a sha no longer in data/ must not resurrect it."""
     merged, _, _ = merge._merge(
-        {}, {}, {}, verbose=False, rejected=set(),
+        {}, {}, {}, verbose=False,
         relabelled={SHA: 'Some Name'})
 
     assert SHA not in merged
