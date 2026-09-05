@@ -25,8 +25,10 @@ SHA = 'a' * 64
 
 
 def _run(votes: dict, existing: dict | None = None, pinned: dict | None = None):
+    # The name ballot is per slot, and the slot ballot below settles on
+    # 'Devices', so these votes are cast under that slot.
     merged, report, _ = merge._merge(
-        {SHA: Counter(votes)}, {SHA: Counter({'Devices': 1})},
+        {SHA: {'Devices': Counter(votes)}}, {SHA: Counter({'Devices': 1})},
         existing or {}, verbose=False, rejected=set(), relabelled=pinned or {},
     )
     return merged.get(SHA, {})

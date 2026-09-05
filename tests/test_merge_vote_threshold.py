@@ -33,7 +33,11 @@ def _existing(sha: str, name: str, votes: int = 5, losers: dict | None = None):
 
 
 def _run(name_votes: dict, existing: dict):
-    return merge._merge(name_votes, {}, existing,
+    # Name votes are keyed by slot since the ballot was split per slot; these
+    # cases are about the tally itself, not about slots, so they vote under the
+    # "slot not stated" bucket, which counts toward whatever the crop is.
+    by_slot = {sha: {'': c} for sha, c in name_votes.items()}
+    return merge._merge(by_slot, {}, existing,
                         verbose=False, rejected=set())
 
 

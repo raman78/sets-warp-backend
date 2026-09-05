@@ -209,8 +209,10 @@ def _collect_votes(
 
     Returns (name_votes, slot_votes, crop_src, per_install,
              contributors_for_sha, staging_records):
-      - name_votes[sha][name]   → count of distinct install_ids voting for name
-      - slot_votes[sha][slot]   → same, for slot
+      - name_votes[sha][slot][name] → count of distinct install_ids voting for
+        that name **on that slot**. The slot is part of the key because a name
+        is only an answer to "what is in this slot?" — see `_merge`.
+      - slot_votes[sha][slot]   → count of distinct install_ids voting for slot
       - crop_src[sha]           → first staging path that has this crop PNG
       - per_install[install_id] → number of entries contributed by that install
       - contributors_for_sha[sha] → install_ids whose annotations voted on sha
@@ -227,7 +229,8 @@ def _collect_votes(
     anno_files = sorted(root.glob('*/annotations.jsonl'))
     print(f'Found {len(anno_files)} contributors with annotations.')
 
-    name_votes: dict[str, Counter] = defaultdict(Counter)
+    name_votes: dict[str, dict[str, Counter]] = defaultdict(
+        lambda: defaultdict(Counter))
     slot_votes: dict[str, Counter] = defaultdict(Counter)
     crop_src:   dict[str, str]     = {}
     per_install: dict[str, int]    = {}
@@ -274,7 +277,7 @@ def _collect_votes(
                     if key in seen_in_install:
                         continue
                     seen_in_install.add(key)
-                    name_votes[sha][name] += 1
+                    name_votes[sha][slot][name] += 1
                     if slot:
                         slot_votes[sha][slot] += 1
                     contributors_for_sha[sha].add(install_id)
@@ -289,8 +292,35 @@ def _collect_votes(
             contributors_for_sha, staging_records)
 
 
+def _ballot_for(sha_votes: dict[str, Counter], slot: str) -> tuple[Counter, dict[str, Counter]]:
+    """Split one crop's name votes into the ballot that counts and the rest.
+
+    A name is not an answer on its own — it answers *"what is in this slot?"*.
+    Counting every name for a crop in one ballot regardless of slot is what
+    produced records like `name='Fleet Yamaguchi Support Cruiser'` with
+    `slot='Ship Tier'`: the name came from the class-line ballot, the slot from
+    the tier ballot, and the pair had never been submitted by anybody. It
+    happens whenever two rows share a bounding box, because identical pixels
+    give an identical hash — the ship class line and the tier badge did exactly
+    that when no badge was found on screen.
+
+    Entries carrying no slot at all are folded into the winner rather than
+    dropped: they are not asserting a *different* slot, they are simply not
+    saying, so they still count toward whatever the crop turns out to be.
+
+    Returns (ballot, dropped_by_slot) so the caller can report what it set
+    aside instead of discarding it in silence.
+    """
+    ballot = Counter(sha_votes.get(slot) or Counter())
+    if slot:
+        ballot.update(sha_votes.get('') or Counter())
+    dropped = {s: c for s, c in sha_votes.items()
+               if s != slot and s != '' and c}
+    return ballot, dropped
+
+
 def _merge(
-    name_votes: dict[str, Counter],
+    name_votes: dict[str, dict[str, Counter]],
     slot_votes: dict[str, Counter],
     existing:   dict[str, dict],
     verbose:    bool,
@@ -338,7 +368,23 @@ def _merge(
 
     pinned = relabelled or {}
 
-    for sha, votes in sorted(name_votes.items()):
+    for sha, by_slot in sorted(name_votes.items()):
+        # The slot is decided first, and the name is then decided *within* it.
+        # Both halves of the record therefore come from the same voters, so the
+        # published pair is one that people actually submitted.
+        slot_c = slot_votes.get(sha) or Counter()
+        slot   = slot_c.most_common(1)[0][0] if slot_c else ''
+        votes, dropped_by_slot = _ballot_for(by_slot, slot)
+        if not votes:
+            continue
+        if dropped_by_slot:
+            # Not discarded quietly: a crop claimed by two slots is a client
+            # sending one picture for two rows, and the count is how anyone
+            # finds out it is still happening.
+            detail = ', '.join(
+                f'{s}={sum(c.values())}' for s, c in sorted(dropped_by_slot.items()))
+            print(f'  [slot] {sha[:12]} settled as {slot!r}; '
+                  f'not counted here: {detail}')
         winner, count = votes.most_common(1)[0]
         # A maintainer who reviewed this crop outranks the tally. They looked
         # at the picture; a client's label is whatever its recogniser or its
@@ -380,8 +426,8 @@ def _merge(
             else:
                 action = 'NEW'
 
-            slot_c = slot_votes.get(sha) or Counter()
-            slot   = slot_c.most_common(1)[0][0] if slot_c else ''
+            # `slot` was decided at the top of the loop, before the name, and
+            # the name ballot was drawn from that slot's voters only.
             losers_dict = {n: v for n, v in votes.most_common()[1:4] if n != winner}
             if action == 'unchanged':
                 # Agreement accumulates. Replacing the count with this
