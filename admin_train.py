@@ -61,6 +61,22 @@ HF_TOKEN   = os.environ.get('HF_TOKEN', '')
 HF_DATASET = os.environ.get('HF_DATASET', 'sets-sto/sto-icon-dataset')
 HF_REPO_ID = os.environ.get('HF_REPO_ID', 'sets-sto/warp-knowledge')
 
+# Slots whose crop is a band of TEXT, not an icon: the ship class line and the
+# tier badge. Their label is a ship name or `T6-X2`, and their picture is a row
+# of letters — so they are training data for reading text, and noise for a
+# model that answers "which item is in this slot?".
+#
+# Every other tool that reasons about labels already knows this
+# (`admin_clean_labels.TEXT_LEARNING_SLOTS`,
+# `democratic_merge_screens._TEXT_LEARNING_SLOTS`,
+# `admin_reject_crops._TEXT_CROP_SLOT_PREFIXES`). `read_curated_crops` was the
+# one reader that did not, and it feeds both trainers, so 49 of the 3189
+# classes in the published `label_map.json` and `embedder_label_map.json` were
+# ship names and tier strings learned from pictures of text — measured
+# 2026-09-05 against the shipped models. The icon matcher could answer `T6-X2`
+# for an equipment slot.
+TEXT_LEARNING_SLOTS = frozenset({'Ship Type', 'Ship Tier', 'Ship Name'})
+
 # ── Training hyper-parameters (mirror local_trainer.py) ──────────────────────
 
 IMG_SIZE       = 64
@@ -167,6 +183,16 @@ def read_curated_crops() -> tuple[dict[str, str], dict[str, int]]:
     Returns (sha → name, sha → vote_count). The merger has already enforced
     Z3 asymmetric thresholds (NEW=1, UPDATE>=2) and dropped poison labels,
     so the trainer just consumes consensus.
+
+    Text-slot records are skipped — see `TEXT_LEARNING_SLOTS`. They are not
+    deleted anywhere: they remain in `data/annotations.jsonl` and remain the
+    input to the OCR correction map, which is what they were collected for.
+    This reader simply stops treating a photograph of a ship's class line as
+    an example of an item icon.
+
+    The count of what was skipped is printed rather than dropped in silence:
+    a number that goes up is the signal that clients are still uploading text
+    crops the icon pipeline has no use for.
     """
     from huggingface_hub import hf_hub_download
 
@@ -181,6 +207,7 @@ def read_curated_crops() -> tuple[dict[str, str], dict[str, int]]:
 
     labels: dict[str, str] = {}
     votes:  dict[str, int] = {}
+    skipped_text = 0
     for line in Path(local).read_text(encoding='utf-8').splitlines():
         line = line.strip()
         if not line:
@@ -193,8 +220,15 @@ def read_curated_crops() -> tuple[dict[str, str], dict[str, int]]:
         name  = (rec.get('name') or '').strip()
         if not (sha and name):
             continue
+        if (rec.get('slot') or '').strip() in TEXT_LEARNING_SLOTS:
+            skipped_text += 1
+            continue
         labels[sha] = name
         votes[sha]  = int(rec.get('votes') or 1)
+    if skipped_text:
+        print(f'  skipped {skipped_text} text-slot record(s) '
+              f'({", ".join(sorted(TEXT_LEARNING_SLOTS))}) — '
+              f'they train OCR corrections, not the icon models')
     return labels, votes
 
 
