@@ -309,6 +309,53 @@ async def get_config_labels():
     return JSONResponse(_get_labels())
 
 
+@app.get('/quota')
+async def get_quota(request: Request, install_id: str = ''):
+    """What this caller has spent today, in the unit the caps are counted in.
+
+    A read, so it is not itself rate limited and cannot make the situation it
+    reports any worse. It answers two questions a refused client otherwise
+    cannot tell apart, because both come back as the same `429`:
+
+    - **Which bucket is full.** A client knows how many requests it sent, but
+      not what the server counted, and not the per-IP bucket it shares with
+      everyone behind the same address.
+    - **Whether the per-IP bucket is per-user at all.** `resolved_ip` is the
+      address this server would rate limit the caller under, and
+      `forwarded_for` is the header it derived that from. If the resolved
+      address is not the caller's own public IP, the bucket is shared by every
+      client behind the same infrastructure and `MAX_REQ_PER_IP` is in effect
+      a global cap rather than a per-user one — which is the difference
+      between "this install is noisy" and "the whole community is locked out
+      after 500 requests a day".
+
+    That second question is open because `_get_client_ip` takes the rightmost
+    `X-Forwarded-For` entry, which identifies the caller only when exactly one
+    trusted proxy sits in front of the app. That was true of the Render
+    deployment it was written for; production is now an HF Space, and the
+    number of hops there has never been checked.
+
+    Counts are the live buckets, so they include this request's own history
+    but not this request — a GET increments nothing.
+    """
+    ip = _get_client_ip(request)
+    today = str(date.today())
+    install_key = f'install:{install_id.strip()}' if install_id.strip() else None
+    async with _rate_limit_lock:
+        ip_used = _rate_limit.get(ip, {}).get(today, 0)
+        install_used = (_rate_limit.get(install_key, {}).get(today, 0)
+                        if install_key else None)
+    return JSONResponse({
+        'day':            today,
+        'resolved_ip':    ip,
+        'forwarded_for':  request.headers.get('X-Forwarded-For', ''),
+        'ip':       {'used': ip_used, 'cap': MAX_REQ_PER_IP},
+        'install':  ({'id': install_id.strip(), 'used': install_used,
+                      'cap': MAX_REQ_PER_INSTALL}
+                     if install_key else None),
+    })
+
+
 @app.get('/knowledge')
 async def get_knowledge():
     """Return the merged community knowledge base."""
@@ -1150,10 +1197,26 @@ def _load_knowledge_from_hf() -> dict[str, str]:
 # ── Rate limit helpers ─────────────────────────────────────────────────────────
 
 def _get_client_ip(request: Request) -> str:
+    """The address this server rate limits a caller under.
+
+    The rightmost `X-Forwarded-For` entry, on the reasoning that a client can
+    forge earlier entries but not the last one — the last is written by the
+    proxy the app is actually behind.
+
+    **That reasoning holds for exactly one trusted proxy**, which was the
+    Render deployment this was written for. Production is an HF Space and the
+    number of hops in front of the app there has not been checked. If it is
+    more than one, the rightmost entry is infrastructure — the same value for
+    every client — and `MAX_REQ_PER_IP` becomes a global cap on the whole
+    community rather than a per-user one.
+
+    `GET /quota` echoes what this returns, alongside the raw header, so the
+    question can be settled by one call from a machine with a known public
+    address. Do not change the rule here on reasoning alone; take the reading
+    first.
+    """
     forwarded = request.headers.get('X-Forwarded-For')
     if forwarded:
-        # Take the rightmost IP, added by the trusted Render proxy.
-        # A client can forge earlier entries but not the last one.
         return forwarded.split(',')[-1].strip()
     return request.client.host if request.client else 'unknown'
 

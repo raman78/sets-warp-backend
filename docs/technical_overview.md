@@ -89,6 +89,7 @@ for writes.
 | `GET` | `/model/version` | Latest centrally-trained model metadata — softmax (`trained_at`) **and** ArcFace embedder (`embedder_trained_at`), versioned separately |
 | `GET` | `/config/labels` | Backend-side label map (screen types + per-build-type slots). Source of truth: `config/labels.json`, shipped to the Space by `deploy_space.py` — if it is missing the backend runs with **no** ingestion validation |
 | `GET` | `/knowledge` | Merged pHash → item-name lookup table |
+| `GET` | `/quota` | What the caller has spent today in each rate-limit bucket, plus the address it is limited under. Optional `?install_id=` adds the install bucket. A read, so it is not rate limited — a diagnostic that counted against the caps would be part of the problem it exists to diagnose |
 | `POST` | `/contribute` | Legacy single-shot pHash contribution |
 | `POST` | `/contribute/bulk-crops` | Up to 50 confirmed icon crops per call |
 | `POST` | `/upload/screen-types` | Up to 20 screen-type screenshots per call |
@@ -121,9 +122,31 @@ Per UTC day, enforced server-side:
 | Requests / IP | 500 | `MAX_REQ_PER_IP` |
 | Requests / install_id | 500 | `MAX_REQ_PER_INSTALL` |
 
-These are independent of the client-side `MAX_DAILY_UPLOADS = 1000`
-counter in `warp/trainer/sync.py` (the client cap is a polite ceiling;
-the server cap is the abuse gate).
+Both buckets are checked and incremented together, so a request needs room
+in each. They count **requests**, not items, and a request counts whether or
+not its contents were accepted.
+
+That unit matters, because the client's own counters historically measured
+something else — `MAX_DAILY_UPLOADS = 1000` in `warp/trainer/sync.py` counted
+crops queued, and the knowledge client counted contributions accepted — so an
+install could be refused all day with both of its guards reading as having
+room. It did: measured 2026-09-06, 127 corrected screen types stuck unshared
+while every POST came back 429. The client now keeps one shared counter in
+the server's unit (`warp.backend_budget`) and stops on a 429 until midnight
+UTC instead of retrying it.
+
+`GET /quota` reports both buckets for the caller, and is not itself rate
+limited — see below.
+
+**Open question: is the per-IP bucket per user?** `_get_client_ip` takes the
+rightmost `X-Forwarded-For` entry, which identifies the caller only when
+exactly one trusted proxy sits in front of the app. That held for the Render
+deployment the function was written for; production is an HF Space and the
+number of hops there has never been checked. If it is more than one, every
+client resolves to the same infrastructure address and `MAX_REQ_PER_IP` is a
+**global** 500/day for the whole community rather than a per-user cap.
+`/quota` echoes `resolved_ip` and the raw `forwarded_for` so this can be
+settled by one call from a machine whose public address is known.
 
 ### Validation
 

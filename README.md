@@ -14,8 +14,13 @@ clients never touch HF directly for writes.
 
 ## Architecture
 
-- **FastAPI on Render** — receives client uploads, serves `/knowledge`
-  and `/model/version`.
+- **FastAPI on a Hugging Face Space** (`sets-sto-warp-backend.hf.space`,
+  Docker SDK) — receives client uploads, serves `/knowledge`,
+  `/model/version` and `/quota`. A push to `main` touching a runtime file
+  deploys it via `.github/workflows/deploy_space.yml`. `render.yaml` is a
+  legacy fallback and is not the live host; anything here that still reads
+  as "on Render" is stale, and one such line — the proxy assumption in
+  `_get_client_ip` — is why `/quota` exists.
 - **HuggingFace Datasets** — `sets-sto/sto-icon-dataset` (raw + curated
   data), `sets-sto/warp-knowledge` (models + pHash overrides).
 - **GitHub Actions** — runs the four democratic mergers every 2 h,
@@ -51,9 +56,9 @@ Optionally add **Variables** for non-default repo names:
 | `HF_DATASET` | `sets-sto/sto-icon-dataset` |
 | `HF_REPO_ID` | `sets-sto/warp-knowledge` |
 
-### 3. Render deployment
+### 3. Deployment (HF Space)
 
-Set these **Environment Variables** on the web service:
+Set these as **Space secrets / variables**:
 
 | Var | Purpose |
 |---|---|
@@ -66,9 +71,10 @@ Set these **Environment Variables** on the web service:
 | `MAX_REQ_PER_IP` | Optional, default 500/day |
 | `MAX_REQ_PER_INSTALL` | Optional, default 500/day |
 
-`render.yaml` pins Python to 3.12 and `requirements.txt` pins every
-dependency with `==`. Do not relax the pins without a deliberate test
-on a Render preview environment.
+`requirements.txt` pins every dependency with `==` and `render.yaml` pins
+Python to 3.12 for the legacy fallback. Do not relax the pins without a
+deliberate test against the Space's Docker runtime, which is what
+production runs on.
 
 ---
 

@@ -3,6 +3,29 @@
 ## [Unreleased]
 
 ### Added
+- **`GET /quota` — which rate-limit bucket is full, and under which address.**
+  A refused client sees only `429` and cannot tell its own install bucket from
+  the per-IP one it shares with everyone behind the same address. The endpoint
+  reports both, plus `resolved_ip` and the raw `forwarded_for` header. It is a
+  read and is not rate limited, because a diagnostic that counted against the
+  caps would be part of the problem it exists to diagnose.
+
+  It exists to settle a question the code raises and nobody has checked:
+  `_get_client_ip` takes the **rightmost** `X-Forwarded-For` entry, which
+  identifies the caller only when exactly one trusted proxy sits in front of
+  the app. That was true of the Render deployment the function was written for
+  — the comment still says so — but production has been an HF Space for some
+  time. With more than one hop, every client resolves to the same
+  infrastructure address and `MAX_REQ_PER_IP` stops being a per-user cap and
+  becomes a **global** 500 requests a day for the whole community. One call
+  from a machine with a known public address decides it. No behaviour is
+  changed here; nothing is fixed until that reading is in.
+
+  Prompted by a client-side backlog measured 2026-09-06: 127 corrected screen
+  types unshared for days, every POST answered `429`, while the client's own
+  guards read as having room — they counted items and accepted contributions,
+  where the server counts requests. The client half is fixed in `sto-warp`
+  (`warp.backend_budget`).
 - **`SKILLS` / `SPACE_SKILLS` / `GROUND_SKILLS` / `DISCARD` accepted as screen
   types.** The client has offered these labels since the skill-tree feature
   landed, but `democratic_merge_screens.SCREEN_TYPES` dropped them on the way
