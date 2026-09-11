@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Fixed
+- **A screenshot filed under two screen types now has both copies drained.**
+  The vote was already one per `(install_id, sha)` and stays that way, but
+  only the *voting* path was recorded, so a second copy from the same install
+  sat in staging for ever. That matters because the vote goes to whichever
+  copy `glob` reaches first: with a stale copy surviving, every merge run was
+  a fresh coin toss over the label.
+
+  The state arises client-side — sto-warp's `set_screen_type` copied a
+  screenshot into the new type's folder and left the old copy, so the
+  classifier's guess and the user's correction of it both went up. Measured on
+  the maintainer's store 2026-09-11: 534 files against 287 labels, 110
+  screenshots filed under two or three mutually exclusive types, 20 as both
+  `BOFFS` and `SPACE_BOFFS`. The client no longer creates it; this makes sure
+  the backend clears what it already holds, and stays right if another client
+  does the same.
+
 ### Added
 - **`GET /quota` — which rate-limit bucket is full, and under which address.**
   A refused client sees only `429` and cannot tell its own install bucket from

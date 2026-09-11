@@ -194,7 +194,7 @@ def _load_existing_text(token: str, repo_files: set[str]) -> dict[str, dict]:
 
 def _collect_votes(token: str) -> tuple[
     dict[str, Counter],                              # screen_votes[sha] → {type: count}
-    dict[str, dict[str, str]],                       # screen_src[sha]   → {iid: staging_path}
+    dict[str, dict[str, list[str]]],                 # screen_src[sha]   → {iid: [staging_path]}
     dict[str, Counter],                              # text_votes[ml]    → {name: count}
     int,                                              # rejected_text votes
     list[str],                                        # staging paths that can never merge
@@ -212,7 +212,7 @@ def _collect_votes(token: str) -> tuple[
 
     # ── (a) Screen-type votes ────────────────────────────────────────────
     screen_votes: dict[str, Counter] = defaultdict(Counter)
-    screen_src:   dict[str, dict[str, str]] = defaultdict(dict)
+    screen_src:   dict[str, dict[str, list[str]]] = defaultdict(dict)
     unpromotable: list[str] = []
 
     for png in root.glob('*/screen_types/*/*.png'):
@@ -237,11 +237,22 @@ def _collect_votes(token: str) -> tuple[
         # do not stack — Counter.update is what `defaultdict(Counter)`
         # gives us, but we instead use `[stype] = 1` semantics keyed by
         # iid so a single install gets exactly one say per sha.
-        if install_id not in screen_src[sha]:
-            screen_src[sha][install_id] = (
-                f'staging/{install_id}/screen_types/{stype}/{sha}.png'
-            )
+        #
+        # Every path is still recorded, because the drain works from this
+        # map and a client can file one screenshot under two types. It did:
+        # `set_screen_type` in sto-warp copied into the new type's folder
+        # and left the old copy, so the same sha arrived as both `BOFFS` and
+        # `SPACE_BOFFS` — the classifier's guess and the user's correction of
+        # it. Recording only the voting path left the other in staging for
+        # ever, and since the vote goes to whichever copy the file walk
+        # reaches first, every later run was a fresh coin toss between the
+        # two. The client no longer creates that state; this makes sure the
+        # backend clears what it already has, and stays right if another
+        # client does the same.
+        paths = screen_src[sha].setdefault(install_id, [])
+        if not paths:
             screen_votes[sha][stype] += 1
+        paths.append(f'staging/{install_id}/screen_types/{stype}/{sha}.png')
 
     # ── (b) Text-correction votes ────────────────────────────────────────
     text_votes:   dict[str, Counter]      = defaultdict(Counter)
@@ -439,7 +450,7 @@ def _apply(
     api, token: str,
     screens_merged:  dict[str, dict],
     screens_promoted:set[str],
-    screen_src:      dict[str, dict[str, str]],
+    screen_src:      dict[str, dict[str, list[str]]],
     existing_screens:dict[str, dict],
     text_merged:     dict[str, dict],
     repo_files:      set[str],
@@ -479,9 +490,10 @@ def _apply(
             # because we vote on the sha + bytes are identical, but be
             # defensive).
             src_path = None
-            for iid, sp in screen_src.get(sha, {}).items():
-                src_path = sp
-                break
+            for iid, sps in screen_src.get(sha, {}).items():
+                if sps:
+                    src_path = sps[0]
+                    break
             if src_path is None:
                 # No staging source — sha was promoted on the strength of
                 # historical data only. Skip the copy; the metadata row
@@ -504,9 +516,10 @@ def _apply(
     #    those whose vote lost: their bytes were folded into the same
     #    sha (it's the same image) so they're redundant.
     for sha in screens_promoted:
-        for iid, src_path in screen_src.get(sha, {}).items():
-            ops.append(CommitOperationDelete(path_in_repo=src_path))
-            drained_pngs += 1
+        for iid, src_paths in screen_src.get(sha, {}).items():
+            for src_path in src_paths:
+                ops.append(CommitOperationDelete(path_in_repo=src_path))
+                drained_pngs += 1
 
     # 3. data/screen_types/metadata.jsonl — full rewrite, sorted by sha
     #    so diffs are reviewable.
