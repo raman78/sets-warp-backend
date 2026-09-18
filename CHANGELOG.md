@@ -3,6 +3,20 @@
 ## [Unreleased]
 
 ### Fixed
+- **The crop review no longer keeps its own copy of "looks colourful".**
+  `admin_reject_crops._looks_real` now calls sto-warp's
+  `icon_matcher._virtual_crop_looks_real`, the way `_looks_blank` and
+  `load_canonical_names` already delegate — one definition, so the tool
+  flags exactly what the client refuses to seed. The copy had drifted:
+  the client learned that the game's yellow *NEW* ribbon is chrome rather
+  than icon content, and the copy had not, so fifteen empty slots wearing
+  one were queued for review and fourteen of them were labelled correctly.
+
+  The local bright/rich copy stays as the fallback for an environment
+  without sto-warp, and `audit_virtual_poison.yml` now installs the client
+  with `--no-deps` so CI has the real rule. Both the scan and the audit
+  print a `Heuristic:` line naming which one answered — the fallback
+  breaches on correct data, and a count alone cannot say that.
 - **A screenshot filed under two screen types now has both copies drained.**
   The vote was already one per `(install_id, sha)` and stays that way, but
   only the *voting* path was recorded, so a second copy from the same install

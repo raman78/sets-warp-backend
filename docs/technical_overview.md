@@ -347,6 +347,18 @@ also driveable from the `admin_console.py` GUI. RELABEL names are validated
 against sto-warp's `warp.data.cargo.canonical_names()`. Rejected shas are
 barred from re-promotion by the denylist read in `democratic_merge_crops.py`.
 
+What counts as "colourful" is **not defined here**. Both directions call
+sto-warp's own guards — `icon_matcher._virtual_crop_looks_real` and
+`_real_crop_looks_blank` — so the audit flags exactly what the client
+refuses to seed and cannot drift from it. That includes the client's rule
+that the game's yellow *NEW* ribbon is chrome, not icon content: without it
+an empty slot carrying one is counted as poison, and the job breaches on
+correct data. The workflow therefore installs `sto-warp` with `--no-deps`
+(numpy and opencv are already present; PySide6, torch and easyocr are not
+wanted on a runner). A local bright/rich copy in `admin_reject_crops.py`
+remains as the fallback, and both the scan and the audit print a
+`Heuristic:` line naming which one answered.
+
 ---
 
 ## 6. Deployment (HF Space)

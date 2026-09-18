@@ -35,7 +35,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from admin_reject_crops import (  # noqa: E402
     REPO, RTYPE, HF_TOKEN, VIRTUAL_SEED_BRIGHT_RATIO, VIRTUAL_SEED_RICH_RATIO,
-    scan,
+    _heuristic_source, scan,
 )
 
 
@@ -55,6 +55,11 @@ def main() -> int:
         return 2
 
     print(f'== Dataset repo: {REPO}')
+    # Which definition of "colourful" is about to run. Without sto-warp the
+    # fallback copy counts the game's NEW ribbon as icon pixels, so an empty
+    # slot carrying one is reported as poison and the job breaches on data
+    # that is perfectly correct. Say so rather than let the count speak.
+    print(f'== Heuristic: {_heuristic_source()}')
     from hf_clone import clone_hf_shallow
     snap_dir = clone_hf_shallow(REPO, HF_TOKEN, repo_type=RTYPE)
 

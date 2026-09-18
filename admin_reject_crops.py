@@ -47,10 +47,15 @@ NEW, unreviewed poison — you never re-litigate a KEEP.
 
 Visual heuristic
 ----------------
-The bright/rich ratios below MUST stay in sync with
-`sto-warp:warp/recognition/icon_matcher.py:_virtual_crop_looks_real` and
-`warp.tools.scrub_training_data` — same numbers so this tool flags exactly
-what the client rejects.
+Not a copy any more: both directions call sto-warp's own guards
+(`icon_matcher._virtual_crop_looks_real` and `_real_crop_looks_blank`), so
+this tool flags exactly what the client refuses to seed and cannot drift
+from it. The bright/rich ratios here are the thresholds those guards are
+run with. A local bright/rich copy remains as the fallback for an
+environment without sto-warp — CI installs only huggingface_hub, opencv
+and numpy — and the scan header says which one answered, because the
+fallback does not know about the game's yellow 'NEW' ribbon and reports a
+genuinely empty slot carrying one as poison.
 
 Workflow
 --------
@@ -122,10 +127,10 @@ VIRTUAL_LABELS = frozenset({'__empty__', '__inactive__'})
 _TEXT_CROP_SLOT_PREFIXES = ('ship_type', 'ship_tier', 'Ship Type',
                             'Ship Tier', 'Ship Name')
 
-# KEEP IN SYNC with sto-warp icon_matcher._virtual_crop_looks_real /
-# warp.tools.scrub_training_data. A virtual-labeled crop with BOTH more than
-# these fractions of bright (V>150) and colour-rich (S>100 & V>100) pixels is
-# a real icon mislabeled empty/inactive.
+# The thresholds the delegated client guard is run with, and the gate of the
+# local fallback copy. A virtual-labeled crop with BOTH more than these
+# fractions of bright (V>150) and colour-rich (S>100 & V>100) pixels is a
+# real icon mislabeled empty/inactive.
 VIRTUAL_SEED_BRIGHT_RATIO = 0.15
 VIRTUAL_SEED_RICH_RATIO   = 0.15
 
@@ -150,8 +155,73 @@ def _bright_rich(bgr: np.ndarray) -> tuple[float, float]:
 
 
 def _looks_real(bgr: np.ndarray) -> bool:
+    """Whether a virtual-labelled crop is really a colourful icon.
+
+    Delegated to sto-warp's `_virtual_crop_looks_real` when it can be
+    imported, for the same reason `_looks_blank` and `load_canonical_names`
+    delegate: one definition, so this tool flags exactly what the client
+    refuses to seed. The local `_bright_rich` copy below is the fallback for
+    an environment without sto-warp — CI installs only huggingface_hub,
+    opencv and numpy — and it is announced by `_heuristic_source()` rather
+    than silently substituted, because it does not know about the game's
+    'NEW' ribbon and so calls a genuinely empty slot poison.
+    """
+    fn = _load_virtual_check()
+    if fn is not None:
+        return bool(fn(bgr))
     bright, rich = _bright_rich(bgr)
     return bright > VIRTUAL_SEED_BRIGHT_RATIO and rich > VIRTUAL_SEED_RICH_RATIO
+
+
+_virtual_check_cache: list = []
+
+
+def _load_virtual_check():
+    """sto-warp's own seed-time guard, with the thresholds this tool was
+    asked for pushed into it so `--bright-ratio` / `--rich-ratio` keep
+    working. Cached: the import is attempted once, not per crop."""
+    if _virtual_check_cache:
+        fn = _virtual_check_cache[0]
+    else:
+        fn = None
+        for _ in range(2):
+            try:
+                from warp.recognition import icon_matcher as _im
+                fn = _im
+                break
+            except Exception:
+                if (_STO_WARP_SIBLING / 'warp' / 'recognition'
+                        / 'icon_matcher.py').exists():
+                    sys.path.insert(0, str(_STO_WARP_SIBLING))
+                else:
+                    break
+        _virtual_check_cache.append(fn)
+    if fn is None:
+        return None
+    fn.VIRTUAL_SEED_BRIGHT_RATIO = VIRTUAL_SEED_BRIGHT_RATIO
+    fn.VIRTUAL_SEED_RICH_RATIO   = VIRTUAL_SEED_RICH_RATIO
+    return fn._virtual_crop_looks_real
+
+
+def _heuristic_source() -> str:
+    """Which definition answered — printed in the scan header so a BREACH
+    from an environment without sto-warp cannot be read as new poison.
+
+    The ribbon rule is reported only if it is actually *there*: an older
+    sto-warp imports cleanly and answers without it, and a header claiming
+    a check that did not run is worse than no header.
+    """
+    if _load_virtual_check() is None:
+        return ('LOCAL bright/rich copy — sto-warp unavailable, so a slot '
+                'carrying the game\'s NEW ribbon is reported as poison')
+    try:
+        from warp.recognition.layout_detector import LayoutDetector
+        ribbon = hasattr(LayoutDetector, '_new_badge_rows')
+    except Exception:
+        ribbon = False
+    return ('sto-warp _virtual_crop_looks_real' +
+            (' (NEW ribbon ignored)' if ribbon else
+             ' — an older build, without the NEW-ribbon rule'))
 
 
 def _looks_blank(bgr: np.ndarray) -> bool:
@@ -877,6 +947,7 @@ def main() -> int:
     print(f'WARP virtual-crop review — {REPO}')
     print(f'Mode: {"APPLY" if args.apply else "SCAN"}  ·  '
           f'gate bright>{args.bright_ratio} rich>{args.rich_ratio}')
+    print(f'Heuristic: {_heuristic_source()}')
     print('=' * 64)
 
     from huggingface_hub import HfApi
