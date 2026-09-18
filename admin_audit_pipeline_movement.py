@@ -47,6 +47,9 @@ REPO = 'sets-sto/sto-icon-dataset'
 RTYPE = 'dataset'
 DATA_ANN = 'data/annotations.jsonl'
 STAGING_PREFIX = 'staging/'
+# What a client's upload commit is called. Its age is what says how long
+# work has been waiting; see the reasoning in `main`.
+UPLOAD_PREFIX = 'WARP bulk:'
 
 # How long `data/` may stand still while staging holds work before this is
 # called a breach. The merge runs every two hours, so a day of silence is
@@ -124,6 +127,21 @@ def main() -> int:
     promotions = [c for c in commits if c.title.startswith('democratic_merge:')]
     last_promotion = promotions[0].created_at if promotions else None
 
+    # How long the *waiting work* has been waiting — which is not the same
+    # question as how old the last promotion is, and answering the second
+    # one cried wolf on 2026-09-18. Nothing was uploaded for six days, so
+    # nothing was promoted for six days; 115 crops then arrived in the
+    # morning, the audit ran four hours later, and reported "the merge is
+    # running and not landing" about a pipeline that landed all 115 at the
+    # next run, 54 minutes afterwards.
+    #
+    # An upload newer than the last promotion is work that promotion did not
+    # cover. The oldest of those is the one to time.
+    uploads_after = [c.created_at for c in commits
+                     if c.title.startswith(UPLOAD_PREFIX)
+                     and (last_promotion is None or c.created_at > last_promotion)]
+    oldest_waiting = min(uploads_after) if uploads_after else None
+
     print('=' * 64)
     print(f'Pipeline movement — {REPO}')
     print('=' * 64)
@@ -134,6 +152,13 @@ def main() -> int:
         age = now - last_promotion
         print(f'last promotion        : {last_promotion:%Y-%m-%d %H:%M} UTC '
               f'({age.days}d {age.seconds // 3600}h ago)')
+    if oldest_waiting is not None:
+        wage = now - oldest_waiting
+        print(f'oldest waiting upload : {oldest_waiting:%Y-%m-%d %H:%M} UTC '
+              f'({wage.days}d {wage.seconds // 3600}h ago)')
+    elif staging_crops:
+        print('oldest waiting upload : none since the last promotion — the '
+              'crops in staging survived it')
 
     residue = _residue(files)
     if residue:
@@ -158,10 +183,17 @@ def main() -> int:
         return 1
 
     limit = timedelta(days=args.max_age_days)
-    if now - last_promotion > limit:
-        print(f'\nBREACH — {len(staging_crops)} crops are waiting and the last '
-              f'promotion was {(now - last_promotion).days} days ago '
-              f'(limit {args.max_age_days}).')
+    # Time the work, not the calendar. `oldest_waiting` is None when staging
+    # holds crops that the last promotion ran over and left behind — that is
+    # the genuine "not landing" shape, and there the promotion's own age is
+    # the right clock.
+    waiting_since = oldest_waiting or last_promotion
+    if now - waiting_since > limit:
+        waited = now - waiting_since
+        print(f'\nBREACH — {len(staging_crops)} crops are waiting and the '
+              f'oldest of them has been waiting {waited.days}d '
+              f'{waited.seconds // 3600}h (limit {args.max_age_days}d); last '
+              f'promotion {last_promotion:%Y-%m-%d %H:%M} UTC.')
         print('The merge is running and not landing. Check the Merge Staging '
               'run log for the commit step, not the summary line: the merge '
               'reports what it *would* promote before it tries to commit.')

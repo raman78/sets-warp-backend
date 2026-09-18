@@ -262,6 +262,17 @@ HF commit fails and both stay pending for the next cycle.
 | Skip condition | `--skip-if-unchanged` (compares against `training_manifest.json`) |
 | Min new crops | 10 (`MIN_NEW_CROPS`) |
 
+The skip compares two things, and it has to: the set of crop SHAs, and
+`label_digest`, a hash of the sorted (SHA, label) pairs. A maintainer
+RELABEL keeps the SHA and changes the name, so on SHAs alone the run
+reported "no new crops" and skipped — and kept skipping, for ever, because
+a relabel also scores zero against `MIN_NEW_CROPS`. A changed digest now
+both defeats the skip and waives the threshold; a maintainer's correction
+is the one decision here that outranks the tally, so it is not the case
+that threshold exists to suppress. A manifest written before the digest
+existed has none, and is compared on SHAs alone as before rather than
+forcing one pointless hour of training.
+
 Architecture: EfficientNet-B0 (icon classifier) + MobileNetV3-Small
 (screen classifier). Both fine-tune from the previous baseline pulled
 from `sets-sto/warp-knowledge/models/`; the classifier head is replaced
@@ -279,7 +290,7 @@ icon_classifier.pt          + label_map.json + icon_classifier_meta.json
 screen_classifier.pt        + screen_classifier_labels.json
 model_version.json          (trained_at, n_classes, val_acc, …)
 ship_type_corrections.json  (optional, only if any text corrections exist)
-training_manifest.json      (set of crop SHAs in this run)
+training_manifest.json      (crop SHAs in this run + label_digest)
 ```
 
 ### ArcFace embedder (`admin_train_metric.py`)

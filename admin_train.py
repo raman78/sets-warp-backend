@@ -1203,8 +1203,30 @@ def train(winner_labels: dict[str, str],
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
-def _load_training_manifest() -> set[str]:
-    """Download models/training_manifest.json from HF. Returns set of crop SHAs used last time."""
+def _label_digest(winner_labels: dict) -> str:
+    """A fingerprint of what the training set *says*, not just which crops
+    are in it.
+
+    The manifest recorded crop SHAs alone, and a maintainer RELABEL keeps the
+    SHA and changes the name — so `current_shas == last_shas` held, the hourly
+    job reported "no new crops" and skipped, and the correction never reached
+    a model. It could sit there for ever: a relabel contributes zero new SHAs,
+    so it never counts towards MIN_NEW_CROPS either. Found 2026-09-18, after
+    an `Auxiliary Battery` was recovered from the `__empty__` class.
+    """
+    payload = '\n'.join(f'{sha}\t{label}'
+                        for sha, label in sorted(winner_labels.items()))
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+
+def _load_training_manifest() -> tuple[set[str], str]:
+    """Download models/training_manifest.json from HF.
+
+    Returns (crop SHAs used last time, label digest). The digest is '' for a
+    manifest written before it existed — the caller then compares SHAs alone,
+    exactly as before, rather than treating "no digest" as "everything
+    changed" and forcing one pointless hour of training.
+    """
     try:
         from huggingface_hub import hf_hub_download
         local = hf_hub_download(
@@ -1212,17 +1234,19 @@ def _load_training_manifest() -> set[str]:
             repo_type='dataset', token=HF_TOKEN or None,
         )
         data = json.loads(Path(local).read_text(encoding='utf-8'))
-        return set(data.get('crop_shas', []))
+        return set(data.get('crop_shas', [])), str(data.get('label_digest', ''))
     except Exception:
-        return set()
+        return set(), ''
 
 
-def _save_training_manifest(crop_shas: set[str], models_dir: Path) -> None:
-    """Save training manifest (set of crop SHAs) to models_dir for upload."""
+def _save_training_manifest(crop_shas: set[str], models_dir: Path,
+                            label_digest: str = '') -> None:
+    """Save training manifest (crop SHAs + what they were called) for upload."""
     manifest = {
-        'crop_shas':  sorted(crop_shas),
-        'updated_at': datetime.now(UTC).isoformat() + 'Z',
-        'count':      len(crop_shas),
+        'crop_shas':    sorted(crop_shas),
+        'label_digest': label_digest,
+        'updated_at':   datetime.now(UTC).isoformat() + 'Z',
+        'count':        len(crop_shas),
     }
     (models_dir / 'training_manifest.json').write_text(
         json.dumps(manifest, indent=2), encoding='utf-8'
@@ -1285,18 +1309,36 @@ Environment (.env or env vars in CI):
     print(f'  {len(winner_labels)} crops, '
           f'avg votes/crop={sum(vote_counts.values())/max(len(vote_counts),1):.1f}')
 
+    # Taken here, before the min-votes filter below can narrow the dict, so
+    # that the digest written to the manifest describes exactly what the next
+    # run compares against. Computing it again at save time would compare a
+    # filtered set with an unfiltered one and never match, which is a retrain
+    # every hour rather than a skip.
+    current_digest = _label_digest(winner_labels)
+
     # 2b. Skip-if-unchanged / MIN_NEW_CROPS check (fast path before downloading)
     if args.skip_if_unchanged and args.train and not args.force:
         current_shas = set(winner_labels.keys())
-        last_shas    = _load_training_manifest()
+        last_shas, last_digest = _load_training_manifest()
         if last_shas and current_shas == last_shas:
-            print(f'\nNo new crops since last training ({len(current_shas)} crops unchanged) — skipping.')
-            return
+            if last_digest and last_digest != current_digest:
+                print(f'\nSame {len(current_shas)} crops, but their labels '
+                      f'changed since last training — proceeding.')
+            else:
+                print(f'\nNo new crops since last training ({len(current_shas)} crops unchanged) — skipping.')
+                return
         new_count = len(current_shas - last_shas)
-        if last_shas and new_count < MIN_NEW_CROPS:
+        relabelled = bool(last_digest) and last_digest != current_digest
+        # A relabel brings no new SHA, so it scores 0 against MIN_NEW_CROPS and
+        # would be skipped here even after passing the check above. The
+        # threshold is there to stop a single new crop from costing an hour of
+        # training; a maintainer correcting a label is not that case — it is
+        # the one decision in this system that outranks the tally.
+        if last_shas and new_count < MIN_NEW_CROPS and not relabelled:
             print(f'\nOnly {new_count} new crop(s) (threshold: {MIN_NEW_CROPS}) — skipping.')
             return
-        print(f'{new_count} new crop(s) since last training — proceeding.')
+        print(f'{new_count} new crop(s) since last training'
+              f'{", plus relabels" if relabelled else ""} — proceeding.')
 
     # Apply min-votes filter — re-read from data/ since vote counts are stamped
     # on each consensus entry (no staging traversal needed).
@@ -1386,7 +1428,8 @@ Environment (.env or env vars in CI):
 
         # 4. Upload
         # Save training manifest (so next run can skip if nothing changed)
-        _save_training_manifest(set(winner_labels.keys()), models_dir)
+        _save_training_manifest(set(winner_labels.keys()), models_dir,
+                                current_digest)
 
         # `n_users` is now reported as the peak vote count across all consensus
         # crops — a lower-bound proxy for unique contributors, since the curated

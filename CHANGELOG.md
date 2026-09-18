@@ -3,6 +3,27 @@
 ## [Unreleased]
 
 ### Fixed
+- **A maintainer's relabel now reaches a model.** `training_manifest.json`
+  recorded crop SHAs alone, and a RELABEL keeps the SHA and changes the
+  name — so `--skip-if-unchanged` saw an identical set, printed "no new
+  crops" and skipped. For ever: a relabel contributes zero new SHAs, so it
+  never counted towards `MIN_NEW_CROPS` either. The manifest now carries
+  `label_digest`, a hash of the sorted (SHA, label) pairs; a changed digest
+  defeats the skip and waives the threshold. It is taken before the
+  min-votes filter narrows the set, so it describes what the next run
+  compares against. A manifest without a digest is compared on SHAs alone,
+  as before, rather than forcing one pointless hour of training.
+
+- **The movement audit times the waiting work, not the calendar.** It
+  breached when crops were in staging and the last promotion was older than
+  the limit — two independent facts. On 2026-09-18 nothing had been uploaded
+  for six days, so nothing had been promoted for six days; 115 crops arrived
+  that morning, the audit ran four hours later and reported "the merge is
+  running and not landing" about a pipeline that landed all 115 at the next
+  run, 54 minutes afterwards. It now measures the oldest upload the last
+  promotion did not cover, and falls back to the promotion's own age for the
+  case that really is a stall — staging holding crops that a promotion ran
+  over and left behind.
 - **The crop review no longer keeps its own copy of "looks colourful".**
   `admin_reject_crops._looks_real` now calls sto-warp's
   `icon_matcher._virtual_crop_looks_real`, the way `_looks_blank` and
