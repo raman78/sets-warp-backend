@@ -3,6 +3,17 @@
 ## [Unreleased]
 
 ### Fixed
+- **A pHash vote is never forgotten.** `admin_merge.py` tallied only the
+  contributions that arrived since its last run, then marked them processed,
+  so a dissent that fell short was lost and changing an entry needed two
+  matching votes inside one two-hour run. 205 such votes were found
+  forgotten on 2026-09-25. `knowledge.json` now keeps a running tally,
+  `votes` (phash → {name: votes}), which replaces the per-run `losers`. An
+  entry changes when a challenger has more votes than the current name and
+  at least `--min`. A hash can be shared by different pictures (one carried
+  five items), so the tally keeps every name and `GET /knowledge` returns it
+  beside `knowledge`, which older clients keep reading unchanged.
+  `admin_scrub_knowledge.py` removes a scrubbed name from the tally too.
 - **A maintainer's relabel now reaches a model.** `training_manifest.json`
   recorded crop SHAs alone, and a RELABEL keeps the SHA and changes the
   name — so `--skip-if-unchanged` saw an identical set, printed "no new

@@ -144,7 +144,8 @@ _rate_limit: dict[str, dict[str, int]] = {}
 _rate_limit_lock = asyncio.Lock()
 
 # In-memory knowledge cache (rebuilt at startup + after each merge)
-_knowledge_cache: dict[str, str] = {}
+# {'knowledge': phash → name, 'votes': phash → {name: votes}}
+_knowledge_cache: dict[str, dict] = {'knowledge': {}, 'votes': {}}
 _knowledge_cache_ts: float = 0.0
 KNOWLEDGE_CACHE_TTL = 300  # seconds
 
@@ -366,7 +367,9 @@ async def get_knowledge():
         _knowledge_cache    = _load_knowledge_from_hf()
         _knowledge_cache_ts = now
 
-    return JSONResponse({'knowledge': _knowledge_cache})
+    # `votes` lets a client choose among every name a hash has been voted
+    # for; clients that predate it read `knowledge` and ignore the rest.
+    return JSONResponse(_knowledge_cache)
 
 
 @app.post('/contribute')
@@ -1175,10 +1178,13 @@ def _get_labels() -> dict:
     return _labels_cache
 
 
-def _load_knowledge_from_hf() -> dict[str, str]:
-    """Download knowledge.json from HF Dataset."""
+def _load_knowledge_from_hf() -> dict[str, dict]:
+    """Download knowledge.json from HF Dataset.
+
+    Returns {'knowledge': phash → name, 'votes': phash → {name: votes}}.
+    """
     if not HF_REPO_ID:
-        return {}
+        return {'knowledge': {}, 'votes': {}}
     try:
         from huggingface_hub import hf_hub_download
         path = hf_hub_download(
@@ -1188,10 +1194,11 @@ def _load_knowledge_from_hf() -> dict[str, str]:
             token=HF_TOKEN or None,
         )
         data = json.loads(Path(path).read_text(encoding='utf-8'))
-        return data.get('knowledge', data)
+        return {'knowledge': data.get('knowledge', data),
+                'votes':     data.get('votes', {})}
     except Exception as e:
         log.warning(f'knowledge.json load failed: {e}')
-        return {}
+        return {'knowledge': {}, 'votes': {}}
 
 
 # ── Rate limit helpers ─────────────────────────────────────────────────────────

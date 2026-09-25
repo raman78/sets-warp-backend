@@ -205,6 +205,33 @@ threshold = min_votes if key in existing else 1
 accepted  = count >= threshold
 ```
 
+### pHash: the tally is kept, and a hash may carry several names
+
+`admin_merge.py` stores a running tally in `knowledge.json` under `votes`,
+phash → {name: votes}. Each run adds its new contributions to that tally,
+so a vote counted once keeps counting. Before 2026-09-25 the merger tallied
+only the contributions that arrived since its last run, then marked them
+processed, and the per-run minority (`losers`) was overwritten every run.
+A dissent that fell short was never seen again, and overturning an entry
+needed two matching votes inside one two-hour window. Measured against the
+live repo that day: 205 processed contributions disagreed with the table,
+all of them forgotten.
+
+An entry changes when a challenger has **more** votes than the current
+name and at least `--min`. A tie keeps the current name. A phash with no
+entry takes its leader on one vote. Entries written before the tally
+existed start at one vote for their current name; the votes that made them
+were not kept.
+
+The tally keeps every name because a hash does not identify one picture.
+One live hash carried votes for five different items: a console, a trait,
+a beam bank and two others. So `knowledge` holds the leader for clients
+that read a single name, and `GET /knowledge` also returns `votes`. A
+client that reads it picks, among the names a hash was voted for, the one
+whose pictures the crop resembles (sto-warp `docs/ML_PIPELINE.md` §6).
+`admin_scrub_knowledge.py` removes a scrubbed name from the tally as well
+as from the map, or its old votes would restore it.
+
 ### Drain on promote
 
 Every merger deletes the staging entries it promoted **in the same

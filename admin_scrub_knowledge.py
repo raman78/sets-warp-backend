@@ -238,6 +238,17 @@ def _save_cleaned(envelope: dict, cleaned: dict[str, str]) -> bool:
     payload_obj = dict(envelope)
     payload_obj['knowledge']  = cleaned
     payload_obj['entries']    = len(cleaned)
+    # admin_merge keeps a running vote tally per phash. A scrubbed name has to
+    # leave the tally too, or its old votes would restore it the next time
+    # anyone votes on that phash.
+    before = envelope.get('knowledge', {}) or {}
+    votes = {ph: dict(names) for ph, names in (envelope.get('votes') or {}).items()}
+    for ph, name in before.items():
+        if ph not in cleaned and name in votes.get(ph, {}):
+            del votes[ph][name]
+    votes = {ph: names for ph, names in votes.items() if names}
+    if votes or 'votes' in envelope:
+        payload_obj['votes'] = votes
     payload_obj['updated_at'] = datetime.now(UTC).isoformat() + 'Z'
     payload = json.dumps(payload_obj, ensure_ascii=False, indent=2).encode('utf-8')
     api = HfApi(token=HF_TOKEN)
