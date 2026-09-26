@@ -232,6 +232,21 @@ whose pictures the crop resembles (sto-warp `docs/ML_PIPELINE.md` §6).
 `admin_scrub_knowledge.py` removes a scrubbed name from the tally as well
 as from the map, or its old votes would restore it.
 
+### The embedder's gallery must be spread out
+
+`admin_train_metric._upload_embedder` refuses to publish when the class
+count or accuracy regressed (`_publication_refusal`, shared with the
+classifier), and since 2026-09-26 also when the gallery has collapsed. That
+check (`_gallery_spread`) is the mean cosine similarity of random gallery
+pairs, refused above `GALLERY_COLLAPSED_SIM` (0.5). A healthy gallery sits
+near 0.03. The version trained that morning measured 0.990 with a
+val_recall@1 of 0.80, so accuracy alone did not catch it. Recall only asks
+whether the nearest neighbour is right. The client, though, reads
+similarities as absolute numbers against fixed thresholds. The client
+refuses such a gallery by the same measure
+(sto-warp `icon_matcher.gallery_spread`), and `tests/test_gallery_spread.py`
+keeps the two copies equal.
+
 ### Drain on promote
 
 Every merger deletes the staging entries it promoted **in the same

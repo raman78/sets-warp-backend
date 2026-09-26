@@ -609,6 +609,34 @@ def _fit_metric(crops: list, labels: list[str],
 
 # ── HF upload ────────────────────────────────────────────────────────────────
 
+# A healthy gallery spreads out: random pairs averaged 0.033 cosine on every
+# published embedder up to 2026-09-26 04:38 UTC. The one trained at 05:59
+# measured 0.990 — every picture on almost the same vector — while its
+# val_recall@1 read 0.80, so the class-count/accuracy guard passed it and
+# every client's absolute thresholds (auto-accept, knowledge check, empty-
+# slot guards) stopped meaning anything. Above this it is not published.
+GALLERY_COLLAPSED_SIM = 0.5
+
+
+def _gallery_spread(embeddings, sample: int = 800) -> float:
+    """Mean cosine similarity between random pairs of gallery rows.
+
+    The same measure as sto-warp's `icon_matcher.gallery_spread`, which
+    refuses such a gallery on the client; CI installs the released sto-warp,
+    so it cannot import the new function yet. tests/test_gallery_spread.py
+    holds the two to the same value.
+    """
+    import numpy as np
+    emb = np.asarray(embeddings, dtype=np.float32)
+    if len(emb) < 2:
+        return 0.0
+    norms = np.linalg.norm(emb, axis=1, keepdims=True)
+    emb = emb / np.where(norms == 0, 1, norms)
+    n = min(sample, len(emb))
+    a = emb[np.random.default_rng(0).choice(len(emb), n, replace=False)]
+    b = emb[np.random.default_rng(1).choice(len(emb), n, replace=False)]
+    return float(np.mean(a @ b.T))
+
 def _published_embedder_meta() -> dict:
     """The embedder metadata currently served, shaped like the classifier's.
 
@@ -662,6 +690,17 @@ def _upload_embedder(models_dir: Path) -> bool:
         float(this.get('val_recall@1') or 0.0),
         _published_embedder_meta(),
     )
+    if not refusal:
+        try:
+            import numpy as np
+            spread = _gallery_spread(np.load(str(idx))['embeddings'])
+        except Exception as e:
+            spread = None
+            print(f'publication guard: gallery spread not measured ({e})', file=sys.stderr)
+        if spread is not None and spread > GALLERY_COLLAPSED_SIM:
+            refusal = (f'the gallery has collapsed: random pictures are {spread:.3f} '
+                       f'alike on average (healthy is near 0; refused above '
+                       f'{GALLERY_COLLAPSED_SIM}). val_recall@1 does not show this.')
     if refusal:
         print(f'REFUSING TO PUBLISH — {refusal}', file=sys.stderr)
         print('The previously published embedder stays in place. A collapsed '

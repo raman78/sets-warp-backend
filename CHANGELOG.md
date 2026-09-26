@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### Fixed
+- **A collapsed embedder is not published.** The embedder trained
+  2026-09-26 05:59 UTC mapped every picture to almost the same vector:
+  random gallery pairs averaged 0.990 cosine, against 0.033 for every
+  earlier version, while val_recall@1 still read 0.80, so the class-count
+  and accuracy guard published it. `_upload_embedder` now also measures the
+  gallery (`_gallery_spread`, the same measure the client refuses on) and
+  refuses above 0.5. That model was replaced on HF by re-publishing the
+  previous one (commit 71976ffc, `republished_from` in its meta).
 - **A pHash vote is never forgotten.** `admin_merge.py` tallied only the
   contributions that arrived since its last run, then marked them processed,
   so a dissent that fell short was lost and changing an entry needed two
