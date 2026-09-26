@@ -62,6 +62,7 @@ jobs:
           HF_DATASET: ${{ secrets.HF_DATASET || 'sets-sto/sto-icon-dataset' }}
           HF_REPO_ID: ${{ secrets.HF_REPO_ID || 'sets-sto/warp-knowledge' }}
         run: |
+          set -o pipefail
           # Output goes to a temp dir on the runner — admin_train_metric.py
           # then uploads to HF via --upload.
           mkdir -p /tmp/warp_metric_out
