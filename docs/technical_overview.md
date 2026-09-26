@@ -262,21 +262,25 @@ costs minutes rather than the 20-minute extraction. After
 published, and the workflow fails visibly. `attempts` and `final_loss` are
 recorded in the meta file too.
 
-**The warm-start does not run on the nightly schedule.** The trainer can
-start its backbone from the softmax classifier's (`--warm-start-from`, or
-`icon_classifier.pt` in the output dir). The workflow passes it only when
-the `warm_start_from_classifier` input is true, and a scheduled run has no
-inputs. So since the cron was added on 2026-05-20, every nightly embedder
-has used ImageNet features. That matters more since 2026-06-12, when the
-backbone was frozen and its features became the only thing it knows about
-icons. Manually dispatched runs did warm-start and were published: on
-2026-09-03/04 they reached val_recall@1 86.8-88.9% on ~12 280 crops,
-against 82-84.5% for nightly runs on 13 000-13 500. That comparison
-flatters the warm-start, because the classifier's backbone has seen crops
-in the embedder's validation split. Whether to make it the nightly default
-is open; the code is in place either way. (It was removed and restored on
-2026-09-26, after a claim that no published embedder had used it turned
-out to be false.)
+**The embedder warm-starts from the classifier, nightly too.** Its
+backbone is frozen (its features are extracted once), so the backbone it
+starts from decides what it knows about icons. The workflow downloads the
+current `icon_classifier.pt` and passes `--warm-start-from`. Until
+2026-09-26 it did so only on a manual dispatch, because a scheduled run has
+no inputs, so every nightly embedder since 2026-05-20 used ImageNet
+features. An empty input now means "on". If the download fails, the run
+trains from ImageNet and raises a workflow warning, rather than failing.
+
+Measured before the switch (`dev/warmstart_compare.py` in sto-warp): both
+variants were trained by `_fit_metric` with the same seed on data/ as of
+2026-09-06, and scored by the client's matcher on the 1055 crops added
+since, which neither the 2026-09-06 classifier nor either embedder had
+seen. The warm-start gave 95.5% top-1 against 93.8% (47 errors against
+65); on real items only, 95.3% against 93.5%. It also converged faster
+(loss 1.19 against 2.29 after three epochs). The trainer's own
+val_recall@1 showed +7 points (88.4% against 81.3%). That figure is
+inflated for the warm-start, because the classifier has seen those
+validation crops. One seed per variant.
 
 ### Drain on promote
 

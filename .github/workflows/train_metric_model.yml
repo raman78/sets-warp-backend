@@ -65,11 +65,15 @@ jobs:
           # Output goes to a temp dir on the runner — admin_train_metric.py
           # then uploads to HF via --upload.
           mkdir -p /tmp/warp_metric_out
+          # Warm-start the frozen backbone from the current classifier. A
+          # scheduled run has no inputs, so an empty value means "on": until
+          # 2026-09-26 the nightly never warm-started. Measured that day on
+          # 1055 crops neither model had seen: 95.5% top-1 with the warm-start
+          # against 93.8% from ImageNet (47 errors against 65).
+          WARM="${{ github.event.inputs.warm_start_from_classifier || 'true' }}"
           WARM_FLAG=""
-          if [ "${{ github.event.inputs.warm_start_from_classifier }}" = "true" ]; then
-            # Pull the current softmax model so the embedder can warm-start
-            # from its backbone weights instead of ImageNet.
-            python -c "
+          if [ "$WARM" = "true" ]; then
+            if python -c "
           from huggingface_hub import hf_hub_download
           import os, shutil
           local = hf_hub_download(
@@ -78,8 +82,12 @@ jobs:
           )
           shutil.copy(local, '/tmp/warp_metric_out/icon_classifier.pt')
           print('Warm-start file copied:', local)
-          "
-            WARM_FLAG="--warm-start-from /tmp/warp_metric_out/icon_classifier.pt"
+          "; then
+              WARM_FLAG="--warm-start-from /tmp/warp_metric_out/icon_classifier.pt"
+            else
+              # Training still runs, from ImageNet — but say so where it shows.
+              echo "::warning::warm-start classifier download failed — training from ImageNet weights"
+            fi
           fi
           python admin_train_metric.py --train --upload --min 1 \
             --deadline-minutes 100 \
