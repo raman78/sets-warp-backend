@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### Fixed
+- **An embedder run that did not learn is retried, then refused.** The
+  2026-09-26 run stalled at loss 5.3 (healthy runs end at 0.08-0.29); a
+  rerun on the same data converged, so it was chance. `admin_train_metric`
+  now seeds each run (`--seed`, stored in the meta), checks the final loss
+  against `CONVERGED_LOSS` 2.0, retrains the projection from the next seed
+  on the features already extracted, and after two failures raises without
+  saving. The warm-start from the classifier, which only ran on manual
+  dispatch, is removed from the trainer and the workflow.
 - **A collapsed embedder is not published.** The embedder trained
   2026-09-26 05:59 UTC mapped every picture to almost the same vector:
   random gallery pairs averaged 0.990 cosine, against 0.033 for every

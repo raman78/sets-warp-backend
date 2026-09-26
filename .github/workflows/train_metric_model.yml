@@ -15,12 +15,6 @@ name: Train Metric Model (ArcFace)
 
 on:
   workflow_dispatch:
-    inputs:
-      warm_start_from_classifier:
-        description: 'Warm-start backbone from existing icon_classifier.pt'
-        required: false
-        default: 'true'
-        type: boolean
   schedule:
     - cron: '45 0 * * *'   # daily at 00:45 UTC (safe window, avoids collision with main model)
 
@@ -65,22 +59,6 @@ jobs:
           # Output goes to a temp dir on the runner — admin_train_metric.py
           # then uploads to HF via --upload.
           mkdir -p /tmp/warp_metric_out
-          WARM_FLAG=""
-          if [ "${{ github.event.inputs.warm_start_from_classifier }}" = "true" ]; then
-            # Pull the current softmax model so the embedder can warm-start
-            # from its backbone weights instead of ImageNet.
-            python -c "
-          from huggingface_hub import hf_hub_download
-          import os, shutil
-          local = hf_hub_download(
-              os.environ['HF_REPO_ID'], 'models/icon_classifier.pt',
-              repo_type='dataset', token=os.environ['HF_TOKEN'],
-          )
-          shutil.copy(local, '/tmp/warp_metric_out/icon_classifier.pt')
-          print('Warm-start file copied:', local)
-          "
-            WARM_FLAG="--warm-start-from /tmp/warp_metric_out/icon_classifier.pt"
-          fi
           python admin_train_metric.py --train --upload --min 1 \
             --deadline-minutes 100 \
-            --out /tmp/warp_metric_out $WARM_FLAG
+            --out /tmp/warp_metric_out

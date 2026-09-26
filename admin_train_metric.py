@@ -60,6 +60,13 @@ PK_K = 4
 BATCH_SIZE = PK_P * PK_K  # 32
 
 MAX_EPOCHS    = 30
+# A run that learned ends with a low training loss: 0.08-0.29 on 14 nightly
+# runs up to 2026-09-25. On 2026-09-26 one stalled at 5.3 from epoch 3 — same
+# code, same data a rerun converged on (0.19) — and its epoch-1 state, a
+# collapsed gallery, was published. Above this the projection is trained
+# again from a fresh seed on the features already extracted.
+CONVERGED_LOSS = 2.0
+TRAIN_ATTEMPTS = 2
 LR            = 3e-4
 PATIENCE      = 5
 BATCHES_PER_EPOCH_MIN = 60  # ensures small datasets still get enough updates
@@ -223,9 +230,16 @@ def _recall_at_1(gallery_emb, gallery_lbl, query_emb, query_lbl) -> float:
 
 # ── Backbone + projection ────────────────────────────────────────────────────
 
-def _build_embedder(prev_model_pt: Path | None = None):
-    """EfficientNet-B0 backbone + Linear → L2-normalize projection to EMBED_DIM."""
-    import torch
+def _build_embedder():
+    """EfficientNet-B0 backbone (ImageNet weights) + Linear → L2-normalize
+    projection to EMBED_DIM.
+
+    The backbone is frozen during training (its features are extracted once),
+    so its weights only decide which features the projection learns on. A
+    warm-start from the softmax classifier's backbone existed but ran only on
+    manual dispatch; every published embedder was trained from ImageNet. It
+    was removed on 2026-09-26 rather than left looking live.
+    """
     import torch.nn as nn
     import torch.nn.functional as F
     import torchvision.models as tv_models
@@ -245,34 +259,25 @@ def _build_embedder(prev_model_pt: Path | None = None):
             e = self.proj(f)
             return F.normalize(e, dim=1)
 
-    model = Embedder()
+    return Embedder()
 
-    # Warm-start: load backbone weights from the previous central softmax model
-    if prev_model_pt and prev_model_pt.exists():
-        try:
-            state = torch.load(str(prev_model_pt), map_location='cpu')
-            # admin_train.py saves the full softmax model — keep only feature layers
-            backbone_state = {}
-            for k, v in state.items():
-                if k.startswith('features.') or k.startswith('avgpool.'):
-                    backbone_state[f'backbone.{k}'] = v
-            missing, unexpected = model.load_state_dict(backbone_state, strict=False)
-            n_loaded = sum(1 for k in state if k.startswith('features.') or k.startswith('avgpool.'))
-            print(f'Warm-start: loaded {n_loaded} backbone tensors from {prev_model_pt.name}')
-        except Exception as e:
-            print(f'Warm-start failed ({e}) — using ImageNet weights')
-    else:
-        print('No previous model — starting from ImageNet weights')
 
-    return model
+def _seed_all(seed: int) -> None:
+    """One seed for the split, the samplers and the initialisation, so a run
+    can be reproduced — the stalled 2026-09-26 run could not be."""
+    import numpy as np
+    import torch
+    random.seed(seed)
+    np.random.seed(seed % (2 ** 32))
+    torch.manual_seed(seed)
 
 
 # ── Main training function ───────────────────────────────────────────────────
 
 def train_metric(winner_labels: dict[str, str],
                  models_dir: Path, tmpdir: Path,
-                 prev_model_pt: Path | None = None,
-                 deadline: float | None = None) -> tuple[float, int]:
+                 deadline: float | None = None,
+                 seed: int | None = None) -> tuple[float, int]:
     """Mirror of admin_train.train() but with ArcFace + PK sampler.
     Reads crops from data/crops/<sha>.png (curated by
     democratic_merge_crops.py). Returns (val_recall@1, n_samples_used)."""
@@ -386,13 +391,13 @@ def train_metric(winner_labels: dict[str, str],
         crops.append(cv2.resize(img, (IMG_SIZE, IMG_SIZE)))
         labels.append(label)
 
-    return _fit_metric(crops, labels, models_dir, prev_model_pt, deadline)
+    return _fit_metric(crops, labels, models_dir, deadline, seed)
 
 
 def _fit_metric(crops: list, labels: list[str],
                 models_dir: Path,
-                prev_model_pt: Path | None,
-                deadline: float | None) -> tuple[float, int]:
+                deadline: float | None,
+                seed: int | None = None) -> tuple[float, int]:
     """Core training loop — pre-computes backbone features for CPU efficiency.
     On CPU, running EfficientNet-B0 forward+backward each epoch is too slow for
     CI timeouts.  Instead: extract backbone features once (with N augmented
@@ -403,6 +408,11 @@ def _fit_metric(crops: list, labels: list[str],
     import torch
     import torch.nn.functional as F
     import torchvision.transforms as T
+
+    if seed is None:
+        seed = random.SystemRandom().randrange(2 ** 31)
+    print(f'Seed: {seed} (rerun with --seed {seed} to reproduce)')
+    _seed_all(seed)
 
     n = len(crops)
     print(f'{n} crops ready.')
@@ -456,7 +466,7 @@ def _fit_metric(crops: list, labels: list[str],
 
     # ── Model ────────────────────────────────────────────────────────────────
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = _build_embedder(prev_model_pt).to(device)
+    model = _build_embedder().to(device)
 
     # ── Pre-compute backbone features ────────────────────────────────────────
     # The EfficientNet-B0 forward pass dominates wall-time on CPU.  Extracting
@@ -499,73 +509,92 @@ def _fit_metric(crops: list, labels: list[str],
     # Free backbone from compute device — only proj + head needed now
     model.backbone.cpu()
 
-    # ── PK sampler on cached features ────────────────────────────────────────
-    train_feat_ds = _FeatureDataset(train_aug_feats, train_aug_labels)
-    batches_per_epoch = max(BATCHES_PER_EPOCH_MIN, len(train_feat_ds) // BATCH_SIZE)
-    pk_sampler = PKBatchSampler(
-        train_aug_labels.tolist(), P=PK_P, K=PK_K,
-        num_batches=batches_per_epoch)
-    dl_train = torch.utils.data.DataLoader(
-        train_feat_ds, batch_sampler=pk_sampler, num_workers=0)
+    # ── Train the projection; retry from a fresh seed if it did not learn ────
+    used_seed = seed
+    final_loss = float('inf')
+    for attempt in range(TRAIN_ATTEMPTS):
+        used_seed = seed + attempt
+        _seed_all(used_seed)
+        model.proj.reset_parameters()
+        # ── PK sampler on cached features ────────────────────────────────────────
+        train_feat_ds = _FeatureDataset(train_aug_feats, train_aug_labels)
+        batches_per_epoch = max(BATCHES_PER_EPOCH_MIN, len(train_feat_ds) // BATCH_SIZE)
+        pk_sampler = PKBatchSampler(
+            train_aug_labels.tolist(), P=PK_P, K=PK_K,
+            num_batches=batches_per_epoch)
+        dl_train = torch.utils.data.DataLoader(
+            train_feat_ds, batch_sampler=pk_sampler, num_workers=0)
 
-    print(f'  Sampler : P={PK_P} x K={PK_K} -> batch={BATCH_SIZE}, '
-          f'{batches_per_epoch} batches/epoch')
+        print(f'  Sampler : P={PK_P} x K={PK_K} -> batch={BATCH_SIZE}, '
+              f'{batches_per_epoch} batches/epoch')
 
-    # ── ArcFace head + optimiser (proj + head only) ──────────────────────────
-    head = _build_arcface_head(EMBED_DIM, n_classes).to(device)
-    optimizer = torch.optim.AdamW(
-        list(model.proj.parameters()) + list(head.parameters()), lr=LR)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=MAX_EPOCHS)
-    criterion = torch.nn.CrossEntropyLoss().to(device)
+        # ── ArcFace head + optimiser (proj + head only) ──────────────────────────
+        head = _build_arcface_head(EMBED_DIM, n_classes).to(device)
+        optimizer = torch.optim.AdamW(
+            list(model.proj.parameters()) + list(head.parameters()), lr=LR)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=MAX_EPOCHS)
+        criterion = torch.nn.CrossEntropyLoss().to(device)
 
-    # ── Training loop (proj + head only — seconds per epoch) ─────────────────
-    best_recall    = 0.0
-    best_state     = None
-    patience_count = 0
+        # ── Training loop (proj + head only — seconds per epoch) ─────────────────
+        best_recall    = 0.0
+        avg_loss       = float('inf')   # a deadline before epoch 1 is not convergence
+        best_state     = None
+        patience_count = 0
 
-    for epoch in range(MAX_EPOCHS):
-        if deadline is not None and time.monotonic() > deadline:
-            print(f'  Time budget exceeded, stopping at epoch {epoch+1}.')
-            break
-
-        model.proj.train(); head.train()
-        loss_sum = 0.0
-        n_batch = 0
-        for feat_batch, yb in dl_train:
-            feat_batch, yb = feat_batch.to(device), yb.to(device)
-            optimizer.zero_grad()
-            emb = F.normalize(model.proj(feat_batch), dim=1)
-            logits = head(emb, yb)
-            loss = criterion(logits, yb)
-            loss.backward()
-            optimizer.step()
-            loss_sum += loss.item()
-            n_batch += 1
-        scheduler.step()
-        avg_loss = loss_sum / max(1, n_batch)
-
-        # Validation: k-NN recall@1 on pre-computed features
-        model.proj.eval()
-        g_emb = _embed_features(model.proj, train_eval_feats, device)
-        q_emb = _embed_features(model.proj, val_feats, device)
-        val_recall = _recall_at_1(
-            g_emb, train_eval_labels.numpy(),
-            q_emb, val_feat_labels.numpy())
-        print(f'  Epoch {epoch+1:2d}/{MAX_EPOCHS}  loss={avg_loss:.3f}  '
-              f'val_recall@1={val_recall:.1%}  best={best_recall:.1%}')
-
-        if val_recall > best_recall:
-            best_recall = val_recall
-            best_state = {
-                'proj': {k: v.cpu().clone() for k, v in model.proj.state_dict().items()},
-                'head': {k: v.cpu().clone() for k, v in head.state_dict().items()},
-            }
-            patience_count = 0
-        else:
-            patience_count += 1
-            if patience_count >= PATIENCE:
-                print(f'  Early stop at epoch {epoch+1}.')
+        for epoch in range(MAX_EPOCHS):
+            if deadline is not None and time.monotonic() > deadline:
+                print(f'  Time budget exceeded, stopping at epoch {epoch+1}.')
                 break
+
+            model.proj.train(); head.train()
+            loss_sum = 0.0
+            n_batch = 0
+            for feat_batch, yb in dl_train:
+                feat_batch, yb = feat_batch.to(device), yb.to(device)
+                optimizer.zero_grad()
+                emb = F.normalize(model.proj(feat_batch), dim=1)
+                logits = head(emb, yb)
+                loss = criterion(logits, yb)
+                loss.backward()
+                optimizer.step()
+                loss_sum += loss.item()
+                n_batch += 1
+            scheduler.step()
+            avg_loss = loss_sum / max(1, n_batch)
+
+            # Validation: k-NN recall@1 on pre-computed features
+            model.proj.eval()
+            g_emb = _embed_features(model.proj, train_eval_feats, device)
+            q_emb = _embed_features(model.proj, val_feats, device)
+            val_recall = _recall_at_1(
+                g_emb, train_eval_labels.numpy(),
+                q_emb, val_feat_labels.numpy())
+            print(f'  Epoch {epoch+1:2d}/{MAX_EPOCHS}  loss={avg_loss:.3f}  '
+                  f'val_recall@1={val_recall:.1%}  best={best_recall:.1%}')
+
+            if val_recall > best_recall:
+                best_recall = val_recall
+                best_state = {
+                    'proj': {k: v.cpu().clone() for k, v in model.proj.state_dict().items()},
+                    'head': {k: v.cpu().clone() for k, v in head.state_dict().items()},
+                }
+                patience_count = 0
+            else:
+                patience_count += 1
+                if patience_count >= PATIENCE:
+                    print(f'  Early stop at epoch {epoch+1}.')
+                    break
+
+        final_loss = avg_loss
+        if final_loss <= CONVERGED_LOSS:
+            break
+        print(f'  Did not converge: final loss {final_loss:.2f} > {CONVERGED_LOSS} '
+              f'(attempt {attempt + 1}/{TRAIN_ATTEMPTS}, seed {used_seed}).')
+    else:
+        raise RuntimeError(
+            f'the projection did not converge in {TRAIN_ATTEMPTS} attempts '
+            f'(last final loss {final_loss:.2f}, seeds {seed}..{used_seed}); '
+            f'nothing is saved or published')
 
     if best_state:
         model.proj.load_state_dict(best_state['proj'])
@@ -599,6 +628,9 @@ def _fit_metric(crops: list, labels: list[str],
             'pk_p':         PK_P,
             'pk_k':         PK_K,
             'n_feature_augs': n_aug,
+            'seed':         used_seed,
+            'attempts':     attempt + 1,
+            'final_loss':   final_loss,
             'trained_at':   datetime.now(UTC).isoformat() + 'Z',
         }, f, indent=2)
 
@@ -767,18 +799,13 @@ def _main_local(args):
     out_dir = Path(args.out) if args.out else (
         Path(__file__).parent.parent / 'sets-warp' / 'warp' / 'models'
     )
-    prev_pt = Path(args.warm_start_from) if args.warm_start_from else (
-        out_dir / 'icon_classifier.pt'
-    )
     print(f'Output dir: {out_dir}')
-    if prev_pt.exists():
-        print(f'Warm-start: {prev_pt.name}')
 
     _fit_metric(
         crops, labels,
         models_dir=out_dir,
-        prev_model_pt=prev_pt if prev_pt.exists() else None,
         deadline=None,
+        seed=args.seed,
     )
 
 
@@ -791,8 +818,9 @@ def main():
                         help='Minimum unique users per crop label (default: 1)')
     parser.add_argument('--out', type=str, default=None,
                         help='Output directory (default: <sets-warp>/warp/models)')
-    parser.add_argument('--warm-start-from', type=str, default=None,
-                        help='Path to previous icon_classifier.pt for backbone warm-start')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Seed for the split, sampling and initialisation '
+                             '(default: random, printed so a run can be reproduced)')
     parser.add_argument('--local-crops', type=str, default=None,
                         help='Skip HF download — train on a local crops/ directory. '
                              'Filenames must follow <prefix>__<label>__<hash>.png.')
@@ -834,10 +862,6 @@ def main():
     )
     print(f'\nOutput dir: {out_dir}')
 
-    prev_pt = Path(args.warm_start_from) if args.warm_start_from else (
-        out_dir / 'icon_classifier.pt'
-    )
-
     _deadline = (time.monotonic() + args.deadline_minutes * 60
                  if args.deadline_minutes else None)
 
@@ -845,8 +869,8 @@ def main():
         train_metric(
             winner_labels,
             models_dir=out_dir, tmpdir=Path(td),
-            prev_model_pt=prev_pt if prev_pt.exists() else None,
             deadline=_deadline,
+            seed=args.seed,
         )
 
     if args.upload:

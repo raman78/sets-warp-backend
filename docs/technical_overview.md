@@ -247,6 +247,25 @@ refuses such a gallery by the same measure
 (sto-warp `icon_matcher.gallery_spread`), and `tests/test_gallery_spread.py`
 keeps the two copies equal.
 
+### The embedder must have learned, and a run can be reproduced
+
+A training run of `admin_train_metric` is seeded (`--seed`, random by
+default, printed and stored in `icon_embedder_meta.json` as `seed`), so the
+split, the samplers and the initialisation can be replayed. After training,
+the final loss is checked against `CONVERGED_LOSS` (2.0). Healthy nightly
+runs end between 0.08 and 0.29. On 2026-09-26 one stalled at 5.3 from epoch
+3, and a rerun on the same code and data reached 0.19, so the stall was
+chance, not data. A run above the limit trains the projection again from
+the next seed, on the backbone features it has already extracted, which
+costs minutes rather than the 20-minute extraction. After
+`TRAIN_ATTEMPTS` (2) failures the run raises. Nothing is saved or
+published, and the workflow fails visibly. `attempts` and `final_loss` are
+recorded in the meta file too.
+
+The warm-start from the softmax classifier's backbone was removed the same
+day. It ran only on a manual dispatch, so no published embedder ever used
+it, and leaving it in suggested otherwise.
+
 ### Drain on promote
 
 Every merger deletes the staging entries it promoted **in the same
