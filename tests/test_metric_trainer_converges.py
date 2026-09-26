@@ -25,7 +25,7 @@ import admin_train_metric as atm
 def small(monkeypatch):
     import torch.nn as nn
 
-    def _tiny():
+    def _tiny(prev_model_pt=None):
         class Tiny(nn.Module):
             def __init__(self):
                 super().__init__()
@@ -46,7 +46,7 @@ def small(monkeypatch):
 
 def test_a_converged_run_is_saved_with_its_seed(tmp_path, small, monkeypatch):
     monkeypatch.setattr(atm, 'CONVERGED_LOSS', float('inf'))
-    atm._fit_metric(*small, models_dir=tmp_path, deadline=None, seed=41)
+    atm._fit_metric(*small, models_dir=tmp_path, prev_model_pt=None, deadline=None, seed=41)
     meta = json.loads((tmp_path / 'icon_embedder_meta.json').read_text())
 
     assert (meta['seed'], meta['attempts']) == (41, 1)
@@ -61,7 +61,7 @@ def test_a_run_that_did_not_learn_is_retried_with_the_next_seed(tmp_path, small,
     monkeypatch.setattr(atm, '_seed_all', lambda s: (seeds.append(s), real(s)))
     monkeypatch.setattr(atm, 'CONVERGED_LOSS', -1.0)
     with pytest.raises(RuntimeError, match='did not converge in 2 attempts'):
-        atm._fit_metric(*small, models_dir=tmp_path, deadline=None, seed=7)
+        atm._fit_metric(*small, models_dir=tmp_path, prev_model_pt=None, deadline=None, seed=7)
 
     assert seeds[-2:] == [7, 8]
     assert 'Did not converge' in capsys.readouterr().out
@@ -70,6 +70,6 @@ def test_a_run_that_did_not_learn_is_retried_with_the_next_seed(tmp_path, small,
 def test_nothing_is_saved_when_no_attempt_learned(tmp_path, small, monkeypatch):
     monkeypatch.setattr(atm, 'CONVERGED_LOSS', -1.0)
     with pytest.raises(RuntimeError):
-        atm._fit_metric(*small, models_dir=tmp_path, deadline=None, seed=3)
+        atm._fit_metric(*small, models_dir=tmp_path, prev_model_pt=None, deadline=None, seed=3)
 
     assert not (tmp_path / 'icon_embedder.pt').exists()

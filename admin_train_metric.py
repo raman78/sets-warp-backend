@@ -230,16 +230,9 @@ def _recall_at_1(gallery_emb, gallery_lbl, query_emb, query_lbl) -> float:
 
 # ── Backbone + projection ────────────────────────────────────────────────────
 
-def _build_embedder():
-    """EfficientNet-B0 backbone (ImageNet weights) + Linear → L2-normalize
-    projection to EMBED_DIM.
-
-    The backbone is frozen during training (its features are extracted once),
-    so its weights only decide which features the projection learns on. A
-    warm-start from the softmax classifier's backbone existed but ran only on
-    manual dispatch; every published embedder was trained from ImageNet. It
-    was removed on 2026-09-26 rather than left looking live.
-    """
+def _build_embedder(prev_model_pt: Path | None = None):
+    """EfficientNet-B0 backbone + Linear → L2-normalize projection to EMBED_DIM."""
+    import torch
     import torch.nn as nn
     import torch.nn.functional as F
     import torchvision.models as tv_models
@@ -259,7 +252,26 @@ def _build_embedder():
             e = self.proj(f)
             return F.normalize(e, dim=1)
 
-    return Embedder()
+    model = Embedder()
+
+    # Warm-start: load backbone weights from the previous central softmax model
+    if prev_model_pt and prev_model_pt.exists():
+        try:
+            state = torch.load(str(prev_model_pt), map_location='cpu')
+            # admin_train.py saves the full softmax model — keep only feature layers
+            backbone_state = {}
+            for k, v in state.items():
+                if k.startswith('features.') or k.startswith('avgpool.'):
+                    backbone_state[f'backbone.{k}'] = v
+            missing, unexpected = model.load_state_dict(backbone_state, strict=False)
+            n_loaded = sum(1 for k in state if k.startswith('features.') or k.startswith('avgpool.'))
+            print(f'Warm-start: loaded {n_loaded} backbone tensors from {prev_model_pt.name}')
+        except Exception as e:
+            print(f'Warm-start failed ({e}) — using ImageNet weights')
+    else:
+        print('No previous model — starting from ImageNet weights')
+
+    return model
 
 
 def _seed_all(seed: int) -> None:
@@ -276,6 +288,7 @@ def _seed_all(seed: int) -> None:
 
 def train_metric(winner_labels: dict[str, str],
                  models_dir: Path, tmpdir: Path,
+                 prev_model_pt: Path | None = None,
                  deadline: float | None = None,
                  seed: int | None = None) -> tuple[float, int]:
     """Mirror of admin_train.train() but with ArcFace + PK sampler.
@@ -391,11 +404,12 @@ def train_metric(winner_labels: dict[str, str],
         crops.append(cv2.resize(img, (IMG_SIZE, IMG_SIZE)))
         labels.append(label)
 
-    return _fit_metric(crops, labels, models_dir, deadline, seed)
+    return _fit_metric(crops, labels, models_dir, prev_model_pt, deadline, seed)
 
 
 def _fit_metric(crops: list, labels: list[str],
                 models_dir: Path,
+                prev_model_pt: Path | None,
                 deadline: float | None,
                 seed: int | None = None) -> tuple[float, int]:
     """Core training loop — pre-computes backbone features for CPU efficiency.
@@ -466,7 +480,7 @@ def _fit_metric(crops: list, labels: list[str],
 
     # ── Model ────────────────────────────────────────────────────────────────
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = _build_embedder().to(device)
+    model = _build_embedder(prev_model_pt).to(device)
 
     # ── Pre-compute backbone features ────────────────────────────────────────
     # The EfficientNet-B0 forward pass dominates wall-time on CPU.  Extracting
@@ -799,11 +813,17 @@ def _main_local(args):
     out_dir = Path(args.out) if args.out else (
         Path(__file__).parent.parent / 'sets-warp' / 'warp' / 'models'
     )
+    prev_pt = Path(args.warm_start_from) if args.warm_start_from else (
+        out_dir / 'icon_classifier.pt'
+    )
     print(f'Output dir: {out_dir}')
+    if prev_pt.exists():
+        print(f'Warm-start: {prev_pt.name}')
 
     _fit_metric(
         crops, labels,
         models_dir=out_dir,
+        prev_model_pt=prev_pt if prev_pt.exists() else None,
         deadline=None,
         seed=args.seed,
     )
@@ -818,6 +838,8 @@ def main():
                         help='Minimum unique users per crop label (default: 1)')
     parser.add_argument('--out', type=str, default=None,
                         help='Output directory (default: <sets-warp>/warp/models)')
+    parser.add_argument('--warm-start-from', type=str, default=None,
+                        help='Path to previous icon_classifier.pt for backbone warm-start')
     parser.add_argument('--seed', type=int, default=None,
                         help='Seed for the split, sampling and initialisation '
                              '(default: random, printed so a run can be reproduced)')
@@ -862,6 +884,10 @@ def main():
     )
     print(f'\nOutput dir: {out_dir}')
 
+    prev_pt = Path(args.warm_start_from) if args.warm_start_from else (
+        out_dir / 'icon_classifier.pt'
+    )
+
     _deadline = (time.monotonic() + args.deadline_minutes * 60
                  if args.deadline_minutes else None)
 
@@ -869,6 +895,7 @@ def main():
         train_metric(
             winner_labels,
             models_dir=out_dir, tmpdir=Path(td),
+            prev_model_pt=prev_pt if prev_pt.exists() else None,
             deadline=_deadline,
             seed=args.seed,
         )

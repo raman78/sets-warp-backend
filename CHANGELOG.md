@@ -9,8 +9,14 @@
   now seeds each run (`--seed`, stored in the meta), checks the final loss
   against `CONVERGED_LOSS` 2.0, retrains the projection from the next seed
   on the features already extracted, and after two failures raises without
-  saving. The warm-start from the classifier, which only ran on manual
-  dispatch, is removed from the trainer and the workflow.
+  saving.
+- **Noted, not changed: the nightly embedder never warm-starts.** The
+  workflow passes `--warm-start-from` only on a manual dispatch; scheduled
+  runs have no inputs, so since 2026-05-20 every nightly embedder used
+  ImageNet features. Manual warm-started runs reached 86.8-88.9% recall
+  against 82-84.5% nightly, a comparison inflated by the classifier having
+  seen the embedder's validation crops. Whether to enable it nightly is
+  open.
 - **A collapsed embedder is not published.** The embedder trained
   2026-09-26 05:59 UTC mapped every picture to almost the same vector:
   random gallery pairs averaged 0.990 cosine, against 0.033 for every

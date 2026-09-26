@@ -262,9 +262,21 @@ costs minutes rather than the 20-minute extraction. After
 published, and the workflow fails visibly. `attempts` and `final_loss` are
 recorded in the meta file too.
 
-The warm-start from the softmax classifier's backbone was removed the same
-day. It ran only on a manual dispatch, so no published embedder ever used
-it, and leaving it in suggested otherwise.
+**The warm-start does not run on the nightly schedule.** The trainer can
+start its backbone from the softmax classifier's (`--warm-start-from`, or
+`icon_classifier.pt` in the output dir). The workflow passes it only when
+the `warm_start_from_classifier` input is true, and a scheduled run has no
+inputs. So since the cron was added on 2026-05-20, every nightly embedder
+has used ImageNet features. That matters more since 2026-06-12, when the
+backbone was frozen and its features became the only thing it knows about
+icons. Manually dispatched runs did warm-start and were published: on
+2026-09-03/04 they reached val_recall@1 86.8-88.9% on ~12 280 crops,
+against 82-84.5% for nightly runs on 13 000-13 500. That comparison
+flatters the warm-start, because the classifier's backbone has seen crops
+in the embedder's validation split. Whether to make it the nightly default
+is open; the code is in place either way. (It was removed and restored on
+2026-09-26, after a claim that no published embedder had used it turned
+out to be false.)
 
 ### Drain on promote
 
