@@ -101,6 +101,16 @@ default — pass `--apply` to commit.
 .venv/bin/python admin_train_metric.py --train
 ```
 
+The embedder starts from the icon classifier's backbone, which gives it a
+better eye for icons than a generic one. It looks for `icon_classifier.pt`
+in the output directory; point it elsewhere with `--warm-start-from PATH`.
+If no classifier is found it trains from generic image weights and says so.
+
+Each run prints its seed. To repeat a run exactly, pass that seed with
+`--seed N`. If training does not settle, the run tries once more with the
+next seed; if that fails too it stops with an error and publishes nothing.
+The nightly workflow does the same, and marks the run failed.
+
 ---
 
 ## 3. Health checks and audit
