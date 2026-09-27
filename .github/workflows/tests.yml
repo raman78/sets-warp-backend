@@ -9,6 +9,14 @@
 #
 # Python 3.12 matches the Space image (space/Dockerfile). torch is the CPU
 # wheel, so the trainer tests run instead of skipping.
+#
+# The admin tools read sto-warp from a checkout beside this repo
+# (`_STO_WARP_SIBLING` in admin_reject_crops.py), which is how the tests
+# pass on the maintainer's machine. sto-warp needs Python 3.14 to pip
+# install, so it is cloned to the same place instead. PySide6 is the other
+# half of the `admin` extra. The one test still skipped here,
+# test_a_real_store_is_fully_accepted, checks a real client's anchors.json
+# and has nothing to read on a runner.
 
 name: Tests
 
@@ -39,7 +47,10 @@ jobs:
           pip install --quiet \
             torch torchvision \
             --index-url https://download.pytorch.org/whl/cpu
-          pip install --quiet -r requirements.txt pytest pyyaml httpx
+          pip install --quiet -r requirements.txt pytest pyyaml httpx PySide6
+
+      - name: Clone sto-warp beside this repo
+        run: git clone --depth 1 https://github.com/raman78/sto-warp.git ../sto-warp
 
       - name: Run tests
         run: python -m pytest tests/ -q -rs
