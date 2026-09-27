@@ -94,7 +94,6 @@ for writes.
 | `POST` | `/contribute/bulk-crops` | Up to 50 confirmed icon crops per call |
 | `POST` | `/upload/screen-types` | Up to 20 screen-type screenshots per call |
 | `POST` | `/upload/anchors` | Up to 20 anchor grids per call |
-| `POST` | `/webhooks/hf-dataset` | HF webhook → triggers GH training workflow |
 | `POST` | `/admin/merge` | Retired (returns HTTP 410) — use the GH merger workflow |
 
 ### Bulk endpoints (Phase 1, added in `[Unreleased]`)
@@ -161,15 +160,18 @@ build types and slot names. It fails open by design and has a three-link
 deploy chain that must hold for it to run at all — see
 [`INGESTION_VALIDATION.md`](INGESTION_VALIDATION.md).
 
-### Webhook trigger
+### What starts a training run
 
-`POST /webhooks/hf-dataset` is invoked by HuggingFace when the dataset
-changes. It calls the GitHub Actions REST API (`GH_TOKEN`, `GH_REPO`)
-to dispatch `train_central_model.yml`. Meant as a fast-path on top of
-the 6-hourly cron. In practice nothing arrives by this path: the last 100
-runs of the workflow were all `schedule` events, and the last dispatch was
-2026-09-04 (checked 2026-09-27). If it starts firing, a dispatch during a
-running training waits in the workflow's `concurrency` group.
+Only the cron in `train_central_model.yml`, and a manual dispatch. There
+was a `POST /webhooks/hf-dataset` endpoint, added in March 2026 when the
+trainer read client uploads directly, so a push to the dataset meant new
+training data. Once the mergers took over, a push meant only a new
+upload in `staging/`, which the trainer does not read. The endpoint was
+removed on 2026-09-27: no HF webhook pointed at it, its default `GH_REPO`
+named a repository that does not exist, a missing credential was logged
+at debug level and answered `ok`, and it accepted any caller. In six
+months the workflow saw 24 dispatches, all at irregular times — none of
+the hourly pattern a working hook would have produced.
 
 ---
 
@@ -359,7 +361,12 @@ Architecture: EfficientNet-B0 (icon classifier) + MobileNetV3-Small
 (screen classifier). Both fine-tune from the previous baseline pulled
 from `sets-sto/warp-knowledge/models/`; the classifier head is replaced
 to match the new `n_classes`, so it is learned from scratch on every
-run. Loss: cross-entropy with class weights (focal loss was dropped — it
+run. Carrying the head over by class name was measured on 2026-09-27 and
+not adopted: from a previous model that never trained on the validation
+crops, it started at 84.8% against 33.4% after one epoch, then early-stopped
+at 86.8% on epoch 11, while the head learned from scratch reached 88.5% by
+epoch 22. It only wins runs shorter than about ten epochs, and a run now
+fits 18-20. Loss: cross-entropy with class weights (focal loss was dropped — it
 miscalibrated the softmax). Schedule: cosine annealing over `MAX_EPOCHS`,
 early stopping, and the time budget below.
 
@@ -505,8 +512,6 @@ target, not the live host.
 | `HF_REPO_ID` | Model + knowledge repo (default `sets-sto/warp-knowledge`) |
 | `HF_ICONS_REPO_ID` | Icon dataset repo (default `sets-sto/sto-icon-dataset`) |
 | `ADMIN_KEY` | Retained for `/admin/merge` 410 response only |
-| `GH_TOKEN` | GitHub PAT with `workflow` scope, used by `/webhooks/hf-dataset` |
-| `GH_REPO` | `owner/name` of this repository |
 | `MAX_REQ_PER_IP` | Optional override, default 500/day |
 | `MAX_REQ_PER_INSTALL` | Optional override, default 500/day |
 

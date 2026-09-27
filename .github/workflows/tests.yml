@@ -1,0 +1,45 @@
+# .github/workflows/tests.yml
+#
+# Run the test suite on every push and pull request to main.
+#
+# Nothing ran `pytest` before this. A test broken by 356f9f3 (2026-09-18)
+# stayed red for nine days and was found by chance while working on
+# something else. A red suite now fails the commit and mails the owner,
+# the same way a failed training run does.
+#
+# Python 3.12 matches the Space image (space/Dockerfile). torch is the CPU
+# wheel, so the trainer tests run instead of skipping.
+
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --quiet \
+            torch torchvision \
+            --index-url https://download.pytorch.org/whl/cpu
+          pip install --quiet -r requirements.txt pytest pyyaml httpx
+
+      - name: Run tests
+        run: python -m pytest tests/ -q -rs

@@ -66,8 +66,6 @@ Set these as **Space secrets / variables**:
 | `HF_REPO_ID` | Model + knowledge repo (default `sets-sto/warp-knowledge`) |
 | `HF_ICONS_REPO_ID` | Icon dataset repo (default `sets-sto/sto-icon-dataset`) |
 | `ADMIN_KEY` | Retained for `/admin/merge` 410 response |
-| `GH_TOKEN` | GitHub PAT with `workflow` scope, used by `/webhooks/hf-dataset` |
-| `GH_REPO` | This repo, e.g. `sets-sto/sets-warp-backend` |
 | `MAX_REQ_PER_IP` | Optional, default 500/day |
 | `MAX_REQ_PER_INSTALL` | Optional, default 500/day |
 
@@ -97,7 +95,6 @@ production runs on.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/webhooks/hf-dataset` | HF webhook → triggers GH training |
 | `POST` | `/admin/merge` | Retired — returns HTTP 410 |
 
 ---

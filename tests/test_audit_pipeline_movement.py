@@ -93,11 +93,27 @@ def test_an_empty_staging_area_is_not_a_breach(run):
     assert run(0, [_Commit(PROMOTION, 400)]) == 0
 
 
+def test_a_fresh_upload_after_a_quiet_spell_is_not_a_breach(run):
+    """2026-09-18: six days without uploads, so six days without a
+    promotion; 115 crops arrived and the audit, four hours later, called a
+    healthy pipeline stalled. The work had waited hours, not days."""
+    commits = [_Commit('WARP bulk: 115 crops + annotations', 4 / 24),
+               _Commit(PROMOTION, 6)]
+
+    assert run(115, commits) == 0
+
+
 def test_other_commits_do_not_count_as_a_promotion(run):
     """Uploads and screen merges kept committing throughout the stall — only
-    the crop promotion rewrites `data/annotations.jsonl`."""
+    the crop promotion rewrites `data/annotations.jsonl`.
+
+    The stall had uploads arriving the whole time, so the oldest one after
+    the promotion is weeks old. With only a recent upload the work has
+    waited hours, and the audit correctly says OK (see
+    `test_a_fresh_upload_after_a_quiet_spell_is_not_a_breach`)."""
     commits = [_Commit('WARP bulk: 50 crops + annotations', 0.1),
                _Commit('democratic_merge_screens: 361 screens', 0.5),
+               _Commit('WARP bulk: 12 crops + annotations', 47),
                _Commit(PROMOTION, 48)]
 
     assert run(2281, commits) == 1

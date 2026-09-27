@@ -45,7 +45,6 @@ Per-call body fields are documented in the FastAPI auto-docs at
 
 | Endpoint | Use |
 |---|---|
-| `POST /webhooks/hf-dataset` | HF webhook → triggers `train_central_model.yml`. Not for client use. |
 | `POST /admin/merge` | Retired (returns HTTP 410). Run `admin_merge.py` via the merger workflow instead. |
 
 ---

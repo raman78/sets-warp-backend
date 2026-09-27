@@ -22,8 +22,6 @@
 #   ADMIN_KEY       — legacy /admin/merge gate; endpoint retired (410) per D-G.8
 #   MAX_REQ_PER_IP        — rate limit per IP per day (default: 500)
 #   MAX_REQ_PER_INSTALL   — rate limit per install_id per day (default: 500)
-#   GH_TOKEN        — GitHub Personal Access Token (with workflow scope)
-#   GH_REPO         — GitHub repository (e.g. "sets-sto/sets-warp-backend")
 
 from __future__ import annotations
 
@@ -134,10 +132,6 @@ def _is_poison_label(name: str) -> bool:
     stripped = (name or '').strip()
     return stripped.startswith('__') or stripped == 'Test Item Name'
 
-
-# GitHub Config for automated training triggers
-GH_TOKEN = os.environ.get('GH_TOKEN', '')
-GH_REPO  = os.environ.get('GH_REPO', 'sets-sto/sets-warp-backend')
 
 # In-memory rate limit: {ip: {date_str: count}}
 _rate_limit: dict[str, dict[str, int]] = {}
@@ -794,51 +788,6 @@ async def upload_sets_gaps(req: SetsGapsRequest, request: Request):
              f'items={len(accepted)} rejected={rejected}')
     return {'ok': True, 'accepted': len(accepted), 'rejected': rejected,
             'reasons': reasons[:3]}
-
-
-@app.post('/webhooks/hf-dataset')
-async def hf_dataset_webhook(request: Request):
-    """
-    Receives HuggingFace Dataset webhook events and triggers GitHub Action training.
-    """
-    if not GH_TOKEN or not GH_REPO:
-        log.debug('HF webhook received but GitHub credentials not configured — skipping trigger')
-        return {'ok': True}
-
-    now = time.time()
-    last_trigger = getattr(hf_dataset_webhook, '_last_trigger', 0)
-    if now - last_trigger < 3600:
-        log.debug(f'HF webhook: GitHub trigger skipped (last trigger {int(now - last_trigger)}s ago)')
-        return {'ok': True, 'triggered': False, 'reason': 'rate_limited'}
-    hf_dataset_webhook._last_trigger = now
-
-    import asyncio
-    asyncio.create_task(_trigger_github_workflow())
-    return {'ok': True, 'triggered': True}
-
-
-async def _trigger_github_workflow() -> None:
-    """Fire a GitHub Actions workflow dispatch for train_central_model.yml."""
-    import urllib.request
-    
-    url = f'https://api.github.com/repos/{GH_REPO}/actions/workflows/train_central_model.yml/dispatches'
-    payload = json.dumps({'ref': 'main'}).encode('utf-8')
-    
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={
-            'Authorization': f'token {GH_TOKEN}',
-            'Accept':        'application/vnd.github.v3+json',
-            'User-Agent':    'WARP-Backend-Trigger',
-        },
-        method='POST',
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            log.info(f'GitHub Workflow triggered on {GH_REPO} (Status: {resp.status})')
-    except Exception as e:
-        log.warning(f'GitHub Workflow trigger failed: {e}')
 
 
 @app.post('/admin/merge')

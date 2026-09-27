@@ -2,7 +2,28 @@
 
 ## [Unreleased]
 
+### Removed
+- **`POST /webhooks/hf-dataset`.** Added in March 2026, when a push to the
+  dataset meant new training data; since the mergers, a push is only a new
+  upload in `staging/`, which the trainer does not read. It had never
+  worked continuously: no HF webhook pointed at it, the default `GH_REPO`
+  named a repository that does not exist, a missing credential was logged
+  at debug level and answered `ok`, and it accepted any caller. The cron
+  and a manual dispatch are what start a training run. `GH_TOKEN` and
+  `GH_REPO` are no longer read.
+
+### Added
+- **The test suite runs on every push and pull request** (`tests.yml`).
+  Nothing ran it before, which is how a broken test stayed red for nine
+  days.
+
 ### Fixed
+- **The movement audit's test matches the rule it tests.** 356f9f3 made
+  the audit time the oldest upload the last promotion did not cover, but
+  `test_other_commits_do_not_count_as_a_promotion` still described the old
+  rule and failed from then on. Its scenario now has uploads arriving
+  through the stall, as they did, and the 2026-09-18 false alarm the fix
+  was for has a test of its own.
 - **A classifier run that trained is published instead of timed out.** The
   job was capped at 60 min and the icon classifier budget checked only
   before an epoch; epochs now take 12-15 min, so one started just under the
