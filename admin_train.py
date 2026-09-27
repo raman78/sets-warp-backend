@@ -99,6 +99,54 @@ SC_MIN_CLASS_SAMPLES = 5  # drop a class from training if it has fewer than this
 SC_MIN_KEEP         = 30  # per screen-type: below this count keep all samples
 SC_MAX_KEEP         = 150 # per screen-type: above SC_MIN_KEEP cap to this many
 
+# ── Time budget on CI ────────────────────────────────────────────────────────
+# `train_central_model.yml` allows the job 330 min (GitHub's own cap is 360).
+# The icon classifier gets 270 of them; the screen classifier its own 8 plus
+# at most one epoch, then the upload. An epoch of the icon classifier took
+# 12-15 min on the CPU runner at 13 600 crops (2026-09-27), so the old
+# 50-min budget stopped it after 3-4 of MAX_EPOCHS, and an epoch started just
+# before the deadline ran the job past the 60-min cap before the upload.
+ICON_TRAIN_BUDGET_S = 270 * 60
+SC_TRAIN_BUDGET_S   = 8 * 60
+
+_T0 = time.monotonic()
+
+
+def _fmt_dur(seconds: float) -> str:
+    m, s = divmod(int(seconds), 60)
+    return f'{m}m{s:02d}s'
+
+
+def _clock() -> str:
+    """Time since the script started, for the log's chronology."""
+    return f't+{_fmt_dur(time.monotonic() - _T0)}'
+
+
+def _next_epoch_fits(deadline: float | None, last_epoch_s: float | None,
+                     now: float | None = None) -> bool:
+    """True when another epoch is expected to finish before `deadline`.
+
+    Checking only `now > deadline` let an epoch start a minute before the
+    deadline and run a full epoch past it — which is what took the job over
+    its timeout. The last epoch's duration is the estimate for the next.
+    """
+    if deadline is None:
+        return True
+    now = time.monotonic() if now is None else now
+    return now + (last_epoch_s or 0.0) <= deadline
+
+
+def _budget_stop_message(model_name: str, epoch: int, deadline: float,
+                         last_epoch_s: float | None) -> str:
+    left = max(deadline - time.monotonic(), 0.0)
+    if last_epoch_s is None:
+        why = 'the budget was already spent before the first epoch'
+    else:
+        why = (f'the last epoch took {_fmt_dur(last_epoch_s)} and '
+               f'{_fmt_dur(left)} of the budget is left')
+    return (f'  Time budget: stopping {model_name} before epoch {epoch} — '
+            f'{why} ({_clock()}).')
+
 # Classes the screen classifier is trained on. Narrower than the ingestion
 # whitelist on purpose: SPACE_/GROUND_ variants are stored but not trained as
 # separate classes (TRAITS has worked this way from the start), so the model
@@ -813,10 +861,15 @@ def train_screen_classifier(
     best_state     = {k: v.cpu().clone() for k, v in model.state_dict().items()}
     patience_count = 0
 
+    last_epoch_s: float | None = None
+    epoch_start:  float | None = None
     for epoch in range(SC_MAX_EPOCHS):
-        if deadline is not None and time.monotonic() > deadline:
-            print(f'  Time budget exceeded, stopping screen classifier at epoch {epoch+1}.')
+        if epoch_start is not None:
+            last_epoch_s = time.monotonic() - epoch_start
+        if not _next_epoch_fits(deadline, last_epoch_s):
+            print(_budget_stop_message('screen classifier', epoch + 1, deadline, last_epoch_s))
             break
+        epoch_start = time.monotonic()
         if epoch == SC_MAX_EPOCHS // 2 and n < 30:
             for p in model.features.parameters():
                 p.requires_grad = True
@@ -840,7 +893,7 @@ def train_screen_classifier(
                 total   += yb.size(0)
         val_acc = correct / total if total > 0 else 0.0
 
-        print(f'  Epoch {epoch+1:2d}/{SC_MAX_EPOCHS}  val_acc={val_acc:.1%}  best={best_val_acc:.1%}')
+        print(f'  Epoch {epoch+1:2d}/{SC_MAX_EPOCHS}  val_acc={val_acc:.1%}  best={best_val_acc:.1%}  ({_clock()})')
 
         if val_acc > best_val_acc:
             best_val_acc   = val_acc
@@ -1129,10 +1182,15 @@ def train(winner_labels: dict[str, str],
     best_state     = None
     patience_count = 0
 
+    last_epoch_s: float | None = None
+    epoch_start:  float | None = None
     for epoch in range(MAX_EPOCHS):
-        if deadline is not None and time.monotonic() > deadline:
-            print(f'  Time budget exceeded, stopping icon classifier at epoch {epoch+1}.')
+        if epoch_start is not None:
+            last_epoch_s = time.monotonic() - epoch_start
+        if not _next_epoch_fits(deadline, last_epoch_s):
+            print(_budget_stop_message('icon classifier', epoch + 1, deadline, last_epoch_s))
             break
+        epoch_start = time.monotonic()
         if epoch == MAX_EPOCHS // 2 and n < 50:
             for p in model.features.parameters():
                 p.requires_grad = True
@@ -1156,7 +1214,7 @@ def train(winner_labels: dict[str, str],
                 total   += yb.size(0)
         val_acc = correct / total if total > 0 else 0.0
 
-        print(f'  Epoch {epoch+1:2d}/{MAX_EPOCHS}  val_acc={val_acc:.1%}  best={best_val_acc:.1%}')
+        print(f'  Epoch {epoch+1:2d}/{MAX_EPOCHS}  val_acc={val_acc:.1%}  best={best_val_acc:.1%}  ({_clock()})')
 
         # P9: hard negatives — re-weight samples the model got wrong with high confidence
         model.eval()
@@ -1397,10 +1455,11 @@ Environment (.env or env vars in CI):
             print(f'No previous screen_classifier.pt ({_e}) — will train from ImageNet.')
             prev_sc_pt = None
 
-        # Allow 50 min for training (leaves ~10 min buffer for upload within 60 min CI timeout)
-        _train_deadline = time.monotonic() + 50 * 60
+        # See ICON_TRAIN_BUDGET_S for how the CI job's time is shared out.
+        _train_deadline = time.monotonic() + ICON_TRAIN_BUDGET_S
 
-        print('\nTraining EfficientNet-B0 (icon classifier)...')
+        print(f'\nTraining EfficientNet-B0 (icon classifier), budget '
+              f'{_fmt_dur(ICON_TRAIN_BUDGET_S)} ({_clock()})...')
         val_acc, n_samples = train(winner_labels, models_dir, tmpdir,
                                    prev_model_pt=prev_icon_pt, deadline=_train_deadline)
 
@@ -1414,10 +1473,10 @@ Environment (.env or env vars in CI):
             print(f'{len(sc_winner_map)} unique screenshots, {len(sc_counts)} classes: '
                   + ', '.join(f'{k}={v}' for k, v in sorted(sc_counts.items())))
             if len(sc_winner_map) >= SC_MIN_SAMPLES:
-                print(f'\nTraining MobileNetV3-Small (screen classifier, peak {sc_max_votes} vote(s) per sha)...')
-                # Separate 8-min deadline — screen classifier is fast (lightweight model,
+                print(f'\nTraining MobileNetV3-Small (screen classifier, peak {sc_max_votes} vote(s) per sha) ({_clock()})...')
+                # Separate deadline — screen classifier is fast (lightweight model,
                 # small dataset) and must not share the icon classifier's exhausted budget.
-                _sc_deadline = time.monotonic() + 8 * 60
+                _sc_deadline = time.monotonic() + SC_TRAIN_BUDGET_S
                 sc_val_acc, sc_n_samples = train_screen_classifier(
                     sc_winner_map, models_dir, tmpdir, prev_model_pt=prev_sc_pt,
                     deadline=_sc_deadline)
@@ -1435,11 +1494,11 @@ Environment (.env or env vars in CI):
         # crops — a lower-bound proxy for unique contributors, since the curated
         # artefact no longer carries per-install attribution.
         n_users_proxy = max(vote_counts.values(), default=0)
-        print('\nUploading models to HF...')
+        print(f'\nUploading models to HF ({_clock()})...')
         ok = _upload_model(models_dir, len(label_counts), val_acc, n_samples, n_users_proxy,
                            sc_val_acc=sc_val_acc, sc_n_samples=sc_n_samples)
         if ok:
-            print(f'\nDone — models published to {HF_REPO_ID}/models/')
+            print(f'\nDone — models published to {HF_REPO_ID}/models/ ({_clock()})')
         else:
             print('\nERROR — upload failed.', file=sys.stderr)
             sys.exit(1)

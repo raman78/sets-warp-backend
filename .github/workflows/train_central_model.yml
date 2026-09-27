@@ -2,9 +2,17 @@
 #
 # Automated WARP Central Model Training — GitHub Actions
 # =======================================================
-# Runs every hour. If no new crops arrived since last training:
+# Runs every 6 hours. If no new crops arrived since last training:
 # exits in ~60 seconds (no compute wasted). Otherwise trains
-# EfficientNet-B0 on community crops and publishes to HF.
+# EfficientNet-B0 on community crops and publishes to HF — a real run
+# takes up to ~5 h (ICON_TRAIN_BUDGET_S in admin_train.py).
+#
+# Why 6 hours: a real run is longer than an hour, and two runs at once
+# would train on the same data and race each other to publish. The 6 h
+# cadence keeps them apart by construction (the job is capped at 330 min);
+# the `concurrency` group below is the guard for a delayed scheduled start
+# or a manual dispatch. It never cancels a running job — the waiting run
+# queues, and GitHub keeps only the newest waiting one.
 #
 # GitHub Actions for PUBLIC repos = unlimited free minutes.
 #
@@ -20,7 +28,7 @@ name: Train Central Model
 
 on:
   schedule:
-    - cron: '0 * * * *'   # every hour, on the hour
+    - cron: '0 */6 * * *'   # every 6 hours, on the hour (00, 06, 12, 18 UTC)
   workflow_dispatch:        # allow manual trigger from GitHub UI
     inputs:
       force_retrain:
@@ -29,10 +37,16 @@ on:
         default: 'false'
         type: boolean
 
+concurrency:
+  group: train-central-model
+  cancel-in-progress: false
+
 jobs:
   train:
     runs-on: ubuntu-latest
-    timeout-minutes: 60     # safety cap — training never exceeds 1 h
+    # GitHub's own cap is 360. The script shares out 330: icon classifier
+    # 270, screen classifier 8 + one epoch, upload — see admin_train.py.
+    timeout-minutes: 330
 
     steps:
       - name: Checkout
@@ -71,4 +85,6 @@ jobs:
           if [ "${{ github.event.inputs.force_retrain }}" = "true" ]; then
             FORCE_FLAG="--force"
           fi
-          python admin_train.py --train --skip-if-unchanged --min 1 $FORCE_FLAG
+          # -u: unbuffered, so the log shows each line when it happens and a
+          # traceback in its place, not all of it at exit.
+          python -u admin_train.py --train --skip-if-unchanged --min 1 $FORCE_FLAG

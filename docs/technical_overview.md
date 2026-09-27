@@ -40,7 +40,7 @@ chain together.
                                 ▼
 ┌───────────────────────────────────────────────────────────────────┐
 │  Trainers                          — GitHub Actions               │
-│    • admin_train.py        (hourly)  EfficientNet + MobileNetV3   │
+│    • admin_train.py        (6-hourly) EfficientNet + MobileNetV3  │
 │    • admin_train_metric.py (daily)   ArcFace embedder             │
 └───────────────────────────────────────────────────────────────────┘
                                 │
@@ -165,8 +165,11 @@ deploy chain that must hold for it to run at all — see
 
 `POST /webhooks/hf-dataset` is invoked by HuggingFace when the dataset
 changes. It calls the GitHub Actions REST API (`GH_TOKEN`, `GH_REPO`)
-to dispatch `train_central_model.yml`. Used as a fast-path on top of
-the hourly cron.
+to dispatch `train_central_model.yml`. Meant as a fast-path on top of
+the 6-hourly cron. In practice nothing arrives by this path: the last 100
+runs of the workflow were all `schedule` events, and the last dispatch was
+2026-09-04 (checked 2026-09-27). If it starts firing, a dispatch during a
+running training waits in the workflow's `concurrency` group.
 
 ---
 
@@ -332,10 +335,12 @@ HF commit fails and both stay pending for the next cycle.
 
 | Aspect | Value |
 |---|---|
-| Cron | Hourly (`0 * * * *` in `train_central_model.yml`) |
+| Cron | Every 6 h (`0 */6 * * *` in `train_central_model.yml`) |
 | Runner | `ubuntu-latest`, CPU-only PyTorch wheels |
-| Hard timeout | 60 min |
-| In-script deadline | 50 min (`time.monotonic() + 50 * 60`) |
+| Hard timeout | 330 min (`timeout-minutes`; GitHub's own cap is 360) |
+| Icon classifier budget | 270 min (`ICON_TRAIN_BUDGET_S`) |
+| Screen classifier budget | 8 min (`SC_TRAIN_BUDGET_S`) |
+| Overlap guard | `concurrency: train-central-model`, never cancels a running job |
 | Skip condition | `--skip-if-unchanged` (compares against `training_manifest.json`) |
 | Min new crops | 10 (`MIN_NEW_CROPS`) |
 
@@ -353,12 +358,35 @@ forcing one pointless hour of training.
 Architecture: EfficientNet-B0 (icon classifier) + MobileNetV3-Small
 (screen classifier). Both fine-tune from the previous baseline pulled
 from `sets-sto/warp-knowledge/models/`; the classifier head is replaced
-to match the new `n_classes`. Loss: focal. Schedule: cosine annealing
-with early stopping.
+to match the new `n_classes`, so it is learned from scratch on every
+run. Loss: cross-entropy with class weights (focal loss was dropped — it
+miscalibrated the softmax). Schedule: cosine annealing over `MAX_EPOCHS`,
+early stopping, and the time budget below.
 
 The trainer also runs `collect_text_corrections()` which builds
 `ship_type_corrections.json` from `Ship Type` / `Ship Tier` annotations
 with non-empty `ml_name` — uploaded alongside the models.
+
+**How the time is shared out.** An icon classifier epoch took 12-15 min on
+the CPU runner at 13 600 crops (2026-09-27). Until then the job was capped
+at 60 min with a 50-min budget, which fitted 3-4 of the 30 epochs, and the
+budget was checked only before an epoch started: an epoch started just
+under the deadline ran the job past its cap during the upload, and two runs
+on 2026-09-27 trained both models and published neither. Now the job has
+330 min and the icon classifier 270 of them, and each training loop
+measures its last epoch and does not start another that would cross the
+deadline (`_next_epoch_fits`). A stop prints the reason with the numbers —
+`Time budget: stopping icon classifier before epoch N — the last epoch took
+…` — and every epoch line and stage header carries `t+…`, the time since
+the script started. The step runs `python -u`, so lines appear as they
+happen; before that the log arrived in one block at exit and a traceback
+printed above the line that failed.
+
+The cron is every 6 h, not hourly, because a real run is now longer than
+an hour and two runs at once would train on the same data and race each
+other to publish; 330 min fits inside 6 h. The hourly cron never ran
+hourly anyway: GitHub delays and drops scheduled runs under load, and it
+started every 2-6 h in practice.
 
 Output files uploaded to `sets-sto/warp-knowledge/models/`:
 
@@ -372,8 +400,10 @@ training_manifest.json      (crop SHAs in this run + label_digest)
 
 ### ArcFace embedder (`admin_train_metric.py`)
 
-Separate workflow `train_metric_model.yml`, daily at 00:45 UTC (off
-the hourly classifier window). Trains the gallery model used as a
+Separate workflow `train_metric_model.yml`, daily at 00:45 UTC. It
+overlaps the 00:00 classifier run, which is harmless: they run on separate
+runners and commit disjoint files to `models/`. A warm-started embedder
+starts from the classifier published before that run. Trains the gallery model used as a
 cross-check in the matcher priority chain. Outputs:
 `icon_embedder.pt`, `embedder_label_map.json`,
 `icon_embedder_meta.json`, `embedding_index.npz`.
@@ -489,7 +519,7 @@ target, not the live host.
 | `AssertionError: Torch not compiled with CUDA enabled` | Nested `torch.device()` in condition was always truthy | `torch.device('cuda' if torch.cuda.is_available() else 'cpu')` |
 | `AttributeError: 'RepoFolder' object has no attribute 'type'` | `list_repo_tree()` returns `RepoFolder` with no `.type` | `isinstance(entry, RepoFolder)` |
 | Training run >1 h on CI | Per-contributor `snapshot_download` loop did N full metadata scans | Single bulk `snapshot_download` with all patterns |
-| CPU training exceeds 60 min CI limit | EfficientNet-B0 × 30 epochs on CPU | `deadline = monotonic() + 50 * 60`, check before each epoch |
+| CPU training exceeds the CI limit | EfficientNet-B0 × 30 epochs on CPU; an epoch started just before the deadline overran it | 330-min job, 270-min icon budget, `_next_epoch_fits` skips an epoch that would cross the deadline |
 | `snapshot_download` hangs ~1 h on a single file | `httpx` async I/O ignores socket timeout | `urllib.request` + `ThreadPoolExecutor(16)` + 120 s socket timeout |
 
 ---

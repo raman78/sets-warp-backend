@@ -22,7 +22,7 @@ on:
         default: 'true'
         type: boolean
   schedule:
-    - cron: '45 0 * * *'   # daily at 00:45 UTC (safe window, avoids collision with main model)
+    - cron: '45 0 * * *'   # daily at 00:45 UTC. Overlaps the 00:00 classifier run; harmless — separate runners, and the two commit different files
 
 jobs:
   train:

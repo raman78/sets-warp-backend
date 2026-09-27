@@ -90,7 +90,7 @@ trainers, the audit) see [`technical_overview.md`](technical_overview.md).
    data/anchors/<build_type>_<bucket>.json  (winning anchor grids)
           │
           │  GitHub Actions: train_central_model.yml
-          │  cron: 0 * * * *  (hourly)
+          │  cron: 0 */6 * * *  (every 6 h)
           │  + train_metric_model.yml (daily, 00:45 UTC)
           ▼
 ┌──────────────────────────────────────────────────────────────────┐
@@ -104,8 +104,8 @@ trainers, the audit) see [`technical_overview.md`](technical_overview.md).
 │  admin_train_metric.py ArcFace embedder + gallery (.npz)         │
 │                                                                  │
 │  Hard caps on CI:                                                │
-│    GH Actions step:   60 min                                     │
-│    In-script deadline: 50 min  (leaves 10 min for upload)        │
+│    GH Actions job:    330 min  (GitHub's own cap: 360)           │
+│    Icon classifier:   270 min, no epoch started that won't fit   │
 │                                                                  │
 │  Skip if unchanged: training_manifest.json compares SHA set      │
 │  against the previous run; <10 new crops → fast-exit (~60 s).    │
@@ -138,11 +138,12 @@ trainers, the audit) see [`technical_overview.md`](technical_overview.md).
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-End-to-end best case: roughly 3.5 h from client confirmation to model
-update on every install (10 min sync delay + ≤2 h merge wait + ≤1 h
-train + ≤15 min model-version poll on the recipient).
+End-to-end worst case: roughly 13.5 h from client confirmation to model
+update on every install (10 min sync delay + ≤2 h merge wait + ≤6 h until
+the next training starts + up to ~5 h training + ≤15 min model-version
+poll on the recipient). GitHub may also start a scheduled run late.
 
-**Two independent clocks.** `train_central_model.yml` (softmax) runs hourly
+**Two independent clocks.** `train_central_model.yml` (softmax) runs every 6 h
 but bails out until ≥ `MIN_NEW_CROPS` (10) *new* shas have landed since the
 manifest was written — note that crop *removals* do not count, so a
 rejection-only cleanup never triggers a retrain on its own.
@@ -272,15 +273,19 @@ must be patched, not papered over.
 | Job | Cadence | Workflow |
 |---|---|---|
 | Merge staging → data/ | every 2 h, `22 */2 * * *` | `merge_staging.yml` |
-| Train icon + screen classifier | hourly, `0 * * * *` | `train_central_model.yml` |
+| Train icon + screen classifier | every 6 h, `0 */6 * * *` | `train_central_model.yml` |
 | Train ArcFace embedder | daily, `45 0 * * *` | `train_metric_model.yml` |
 | Audit staging health | monthly, `0 4 1 * *` | `audit_staging_health.yml` |
 | Drain stale staging | manual only | `drain_stale_staging.yml` |
 
 The two-hour merge cadence is deliberately offset (`:22`) from the
-classifier hour boundary so the trainer never starts mid-merge — by
-the time `0 * * * *` fires, the most recent `:22` merger is already
-done or already an hour stale.
+classifier's start so the trainer never starts mid-merge — by the time
+`0 */6 * * *` fires, the most recent `:22` merger has been done for well
+over an hour (a merge takes 1-2 min).
+
+The classifier runs every 6 h rather than hourly because a real run takes
+up to ~5 h, and two at once would race to publish; see
+`technical_overview.md` §4, "How the time is shared out".
 
 ---
 

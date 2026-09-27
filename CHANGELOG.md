@@ -3,6 +3,18 @@
 ## [Unreleased]
 
 ### Fixed
+- **A classifier run that trained is published instead of timed out.** The
+  job was capped at 60 min and the icon classifier budget checked only
+  before an epoch; epochs now take 12-15 min, so one started just under the
+  50-min budget ran the job past its cap during the upload. Four of the
+  seven runs before 2026-09-27 that trained were killed that way and
+  published nothing. The job now has 330 min (GitHub's cap is 360), the
+  icon classifier 270 of them, and neither training loop starts an epoch
+  its last epoch's duration says will not finish in time. The cron moves
+  from hourly to every 6 h so runs cannot overlap, with a `concurrency`
+  group as the guard. The step runs `python -u`, and every epoch and stage
+  prints `t+…` since the start, so the log is a timeline and a budget stop
+  says why, with the numbers.
 - **An embedder run that did not learn is retried, then refused.** The
   2026-09-26 run stalled at loss 5.3 (healthy runs end at 0.08-0.29); a
   rerun on the same data converged, so it was chance. `admin_train_metric`

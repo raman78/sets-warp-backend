@@ -24,7 +24,7 @@ clients never touch HF directly for writes.
 - **HuggingFace Datasets** — `sets-sto/sto-icon-dataset` (raw + curated
   data), `sets-sto/warp-knowledge` (models + pHash overrides).
 - **GitHub Actions** — runs the four democratic mergers every 2 h,
-  trains the classifiers hourly, trains the embedder daily, runs the
+  trains the classifiers every 6 h, trains the embedder daily, runs the
   staging audit monthly.
 
 For the end-to-end data flow see
@@ -124,7 +124,7 @@ production runs on.
 | Workflow | Cadence | Runs |
 |---|---|---|
 | `merge_staging.yml` | every 2 h, `22 */2 * * *` | All four mergers |
-| `train_central_model.yml` | hourly, `0 * * * *` | `admin_train.py` |
+| `train_central_model.yml` | every 6 h, `0 */6 * * *` | `admin_train.py` |
 | `train_metric_model.yml` | daily, `45 0 * * *` | `admin_train_metric.py` |
 | `audit_staging_health.yml` | monthly, `0 4 1 * *` | `admin_audit_staging.py` |
 | `drain_stale_staging.yml` | manual only | `admin_drain_stale_staging.py` |
