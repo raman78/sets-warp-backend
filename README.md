@@ -84,7 +84,7 @@ production runs on.
 |---|---|---|
 | `GET` | `/health` | Liveness check + whether ingestion validation is enforcing |
 | `GET` | `/knowledge` | Merged pHash → item-name table |
-| `GET` | `/model/version` | Latest trained model metadata |
+| `GET` | `/model/version` | Latest trained model metadata (`?input=128` → the 128 set, `models_path` says where) |
 | `GET` | `/config/labels` | Backend-side label map |
 | `POST` | `/contribute` | Single pHash contribution (legacy) |
 | `POST` | `/contribute/bulk-crops` | Up to 50 confirmed crops per batch |

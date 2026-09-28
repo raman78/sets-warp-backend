@@ -18,7 +18,7 @@ for the end-to-end data flow see [`DATA_LIFECYCLE.md`](DATA_LIFECYCLE.md).
 |---|---|
 | `GET /health` | Liveness check, returns `{"ok": true}` |
 | `GET /knowledge` | Merged pHash → item-name table |
-| `GET /model/version` | Metadata for the latest trained model |
+| `GET /model/version` | Metadata for the latest trained model. `?input=128` asks for the model set trained at that input size; the answer's `models_path` names the folder to download from |
 | `GET /config/labels` | Backend-side label map (screen types + slots) |
 
 ### Writing (bulk — preferred)

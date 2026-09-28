@@ -13,6 +13,15 @@
   `GH_REPO` are no longer read.
 
 ### Added
+- **`/model/version?input=128`**, and `models_path` in every answer. A
+  client that can feed a model its declared input size asks for the set
+  trained at 128; until one is published under `models/in128/` it gets the
+  `models/` set, and the answer says which, so it downloads from the right
+  folder. A client that asks nothing gets `models/` exactly as before —
+  clients that hardcode 224 must, because a 128 model fed 224 loses about
+  24 points in the embedder (measured 2026-09-28). Nothing publishes to
+  `models/in128/` yet; the trainers move once a client that reads the input
+  size is released.
 - **The test suite runs on every push and pull request** (`tests.yml`).
   Nothing ran it before, which is how a broken test stayed red for nine
   days.

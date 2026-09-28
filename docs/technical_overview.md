@@ -86,7 +86,7 @@ for writes.
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | Liveness check. Also reports `validation`: `enforcing` or `DISABLED (empty whitelist)` — an empty whitelist switches every ingestion gate off, so it must be visible from outside |
-| `GET` | `/model/version` | Latest centrally-trained model metadata — softmax (`trained_at`) **and** ArcFace embedder (`embedder_trained_at`), versioned separately |
+| `GET` | `/model/version` | Latest centrally-trained model metadata — softmax (`trained_at`) **and** ArcFace embedder (`embedder_trained_at`), versioned separately. `?input=128` asks for the set trained at that input size; `models_path` in the answer names the HF folder the version describes (see "Icon models per input size") |
 | `GET` | `/config/labels` | Backend-side label map (screen types + per-build-type slots). Source of truth: `config/labels.json`, shipped to the Space by `deploy_space.py` — if it is missing the backend runs with **no** ingestion validation |
 | `GET` | `/knowledge` | Merged pHash → item-name lookup table |
 | `GET` | `/quota` | What the caller has spent today in each rate-limit bucket, plus the address it is limited under. Optional `?install_id=` adds the install bucket. A read, so it is not rate limited — a diagnostic that counted against the caps would be part of the problem it exists to diagnose |

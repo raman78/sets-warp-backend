@@ -143,9 +143,16 @@ _knowledge_cache: dict[str, dict] = {'knowledge': {}, 'votes': {}}
 _knowledge_cache_ts: float = 0.0
 KNOWLEDGE_CACHE_TTL = 300  # seconds
 
-# In-memory model version cache
-_model_version_cache: dict = {}
-_model_version_cache_ts: float = 0.0
+# Where the icon models live on HF, by the input size they were trained at.
+# `models/` holds the 224 set and stops changing once the trainers publish
+# elsewhere: clients that send no `input` hardcode 224, and a 128 model fed
+# 224 loses about 24 points in the embedder (measured 2026-09-28), so they
+# must keep the last 224 set rather than receive the new one.
+LEGACY_MODELS_PATH = 'models'
+MODELS_PATH_BY_INPUT = {128: 'models/in128'}
+
+# In-memory model version cache: models path → (loaded_at, version)
+_model_version_cache: dict[str, tuple[float, dict]] = {}
 
 # In-memory whitelist cache (D-G.6). Runtime source of truth is HF
 # `<HF_ICONS_REPO_ID>:config/labels.json`; bundled `config/labels.json`
@@ -280,18 +287,32 @@ async def health():
 
 
 @app.get('/model/version')
-async def get_model_version():
-    """Return metadata for the latest centrally-trained model."""
-    global _model_version_cache, _model_version_cache_ts
+async def get_model_version(input: int | None = None):
+    """Return metadata for the latest centrally-trained model.
 
+    `input` is the model input size the client can feed. A client that
+    sends one gets the set trained at that size once it is published, and
+    the legacy set until then; `models_path` in the answer says which, so
+    the client downloads from the path the version describes. A client that
+    sends nothing gets the legacy set, exactly as before.
+    """
+    paths = [LEGACY_MODELS_PATH]
+    if input in MODELS_PATH_BY_INPUT:
+        paths.insert(0, MODELS_PATH_BY_INPUT[input])
+    for path in paths:
+        version = _cached_model_version(path)
+        if version:
+            return JSONResponse({'available': True, **version})
+    return JSONResponse({'available': False})
+
+
+def _cached_model_version(models_path: str) -> dict:
     now = time.time()
-    if now - _model_version_cache_ts > KNOWLEDGE_CACHE_TTL:
-        _model_version_cache    = _load_model_version_from_hf()
-        _model_version_cache_ts = now
-
-    if not _model_version_cache:
-        return JSONResponse({'available': False})
-    return JSONResponse({'available': True, **_model_version_cache})
+    loaded_at, version = _model_version_cache.get(models_path, (0.0, {}))
+    if now - loaded_at > KNOWLEDGE_CACHE_TTL:
+        version = _load_model_version_from_hf(models_path)
+        _model_version_cache[models_path] = (now, version)
+    return version
 
 
 @app.get('/config/labels')
@@ -977,10 +998,10 @@ def _fetch_staging_annotations(install_id: str) -> list[str]:
         return []
 
 
-def _load_model_version_from_hf() -> dict:
+def _load_model_version_from_hf(models_path: str = LEGACY_MODELS_PATH) -> dict:
     """
-    Download models/model_version.json from HF and stamp the ArcFace embedder
-    version onto it.
+    Download <models_path>/model_version.json from HF and stamp the ArcFace
+    embedder version and the path itself onto it.
 
     The softmax classifier and the ArcFace embedder are published by two
     independent trainers (admin_train.py / admin_train_metric.py) with their own
@@ -994,16 +1015,17 @@ def _load_model_version_from_hf() -> dict:
         from huggingface_hub import hf_hub_download
         path = hf_hub_download(
             repo_id=HF_REPO_ID,
-            filename='models/model_version.json',
+            filename=f'{models_path}/model_version.json',
             repo_type='dataset',
             token=HF_TOKEN or None,
         )
         version = json.loads(Path(path).read_text(encoding='utf-8'))
     except Exception as e:
-        log.debug(f'models/model_version.json not found: {e}')
+        log.debug(f'{models_path}/model_version.json not found: {e}')
         return {}
+    version['models_path'] = models_path
 
-    embedder = _load_embedder_meta_from_hf()
+    embedder = _load_embedder_meta_from_hf(models_path)
     if embedder.get('trained_at'):
         version['embedder_trained_at'] = embedder['trained_at']
         version['embedder_n_classes']  = embedder.get('n_classes', 0)
@@ -1011,21 +1033,21 @@ def _load_model_version_from_hf() -> dict:
     return version
 
 
-def _load_embedder_meta_from_hf() -> dict:
-    """Download models/icon_embedder_meta.json from HF (empty dict if absent)."""
+def _load_embedder_meta_from_hf(models_path: str = LEGACY_MODELS_PATH) -> dict:
+    """Download <models_path>/icon_embedder_meta.json from HF (empty dict if absent)."""
     if not HF_REPO_ID:
         return {}
     try:
         from huggingface_hub import hf_hub_download
         path = hf_hub_download(
             repo_id=HF_REPO_ID,
-            filename='models/icon_embedder_meta.json',
+            filename=f'{models_path}/icon_embedder_meta.json',
             repo_type='dataset',
             token=HF_TOKEN or None,
         )
         return json.loads(Path(path).read_text(encoding='utf-8'))
     except Exception as e:
-        log.debug(f'models/icon_embedder_meta.json not found: {e}')
+        log.debug(f'{models_path}/icon_embedder_meta.json not found: {e}')
         return {}
 
 

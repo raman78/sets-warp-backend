@@ -151,8 +151,17 @@ rejection-only cleanup never triggers a retrain on its own.
 the embedder routinely gets ahead of the classifier. `/model/version`
 therefore carries both stamps — `trained_at` and `embedder_trained_at`
 (plus `embedder_n_classes`, `embedder_recall`), read from
-`models/icon_embedder_meta.json` — and the client compares them
-separately. Before that, a stalled classifier pinned every install to a
+the same folder's `icon_embedder_meta.json` — and the client compares
+them separately. Which folder is the next paragraph.
+
+**Icon models per input size.** A client asking `?input=128` gets the set
+under `models/in128/` once one is published, and the `models/` set until
+then; a client asking nothing always gets `models/`. The answer carries
+`models_path`, and the client downloads from exactly that folder. The split
+exists because a model trained at 128 and fed 224 — which every client
+older than the input-size change does — loses about 24 points in the
+embedder (measured 2026-09-28), so those clients must keep the last 224
+set rather than receive the new one. Before that, a stalled classifier pinned every install to a
 stale embedder even though a fresher one was sitting on HF.
 
 ---
