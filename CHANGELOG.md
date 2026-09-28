@@ -2,15 +2,6 @@
 
 ## [Unreleased]
 
-### Fixed
-- **Training no longer writes Git LFS hooks into the caller's repository.**
-  Both trainers ran `git lfs install` before cloning the crops, which also
-  installs four LFS hooks into whatever repository the command runs inside.
-  A local run from the sto-warp checkout on 2026-09-28 left them there, and
-  every push from that checkout then failed on the missing `git-lfs`. The
-  call is now `git lfs install --skip-repo`: the filters the clone needs,
-  no hooks. On CI nothing changes; the runner's checkout is discarded.
-
 ### Removed
 - **`POST /webhooks/hf-dataset`.** Added in March 2026, when a push to the
   dataset meant new training data; since the mergers, a push is only a new
@@ -27,6 +18,13 @@
   days.
 
 ### Fixed
+- **Training no longer writes Git LFS hooks into the caller's repository.**
+  Both trainers ran `git lfs install` before cloning the crops, which also
+  installs four LFS hooks into whatever repository the command runs inside.
+  A local run from the sto-warp checkout on 2026-09-28 left them there, and
+  every push from that checkout then failed on the missing `git-lfs`. The
+  call is now `git lfs install --skip-repo`: the filters the clone needs,
+  no hooks. On CI nothing changes; the runner's checkout is discarded.
 - **The movement audit's test matches the rule it tests.** 356f9f3 made
   the audit time the oldest upload the last promotion did not cover, but
   `test_other_commits_do_not_count_as_a_promotion` still described the old
