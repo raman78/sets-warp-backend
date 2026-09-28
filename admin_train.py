@@ -998,7 +998,11 @@ def train(winner_labels: dict[str, str],
                 output=exc.output, stderr=exc.stderr) from None
 
     print('Cloning data/crops over git (the REST path is rate-limited)...')
-    _sp.run(['git', 'lfs', 'install'], check=True,
+    # --skip-repo: set up the LFS filters the clone needs, but install no
+    # hooks. Without it, `git lfs install` run from inside any repository
+    # writes four LFS hooks into that repo; on 2026-09-28 a local run from
+    # the sto-warp checkout left them there and every push from it failed.
+    _sp.run(['git', 'lfs', 'install', '--skip-repo'], check=True,
             stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
     _git(*_auth, 'clone', '--no-checkout', '--depth', '1',
          _clone_url, str(_clone_dir))

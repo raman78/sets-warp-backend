@@ -51,3 +51,17 @@ def test_a_missing_crop_is_named_not_only_counted(name):
 
     assert '_first_errors' in src
     assert 'first failures' in src
+
+
+@pytest.mark.parametrize('name', SOURCES)
+def test_lfs_install_touches_no_repository(name):
+    """`git lfs install` without --skip-repo writes hooks into whatever
+    repository it runs inside. A local run from the sto-warp checkout left
+    four there on 2026-09-28, and every push from that checkout failed."""
+    import re
+    src = (ROOT / name).read_text()
+    calls = re.findall(r"\[\s*'git',\s*'lfs',\s*'install'([^\]]*)\]", src)
+
+    assert calls, 'the trainer no longer installs LFS — the clone needs its filters'
+    assert all("'--skip-repo'" in args for args in calls), (
+        'git lfs install without --skip-repo installs hooks into the caller\'s repo')
