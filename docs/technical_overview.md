@@ -359,14 +359,15 @@ forcing one pointless hour of training.
 
 Architecture: EfficientNet-B0 (icon classifier) + MobileNetV3-Small
 (screen classifier). Both fine-tune from the previous baseline pulled
-from `sets-sto/warp-knowledge/models/`; the classifier head is replaced
+from `sets-sto/warp-knowledge` (the icon classifier from `ICON_MODELS_PATH`,
+see "Icon models per input size" below); the classifier head is replaced
 to match the new `n_classes`, so it is learned from scratch on every
 run. Carrying the head over by class name was measured on 2026-09-27 and
 not adopted: from a previous model that never trained on the validation
 crops, it started at 84.8% against 33.4% after one epoch, then early-stopped
 at 86.8% on epoch 11, while the head learned from scratch reached 88.5% by
 epoch 22. It only wins runs shorter than about ten epochs, and a run now
-fits 18-20. Loss: cross-entropy with class weights (focal loss was dropped — it
+fits about 40 (128 px, below). Loss: cross-entropy with class weights (focal loss was dropped — it
 miscalibrated the softmax). Schedule: cosine annealing over `MAX_EPOCHS`,
 early stopping, and the time budget below.
 
@@ -374,8 +375,11 @@ The trainer also runs `collect_text_corrections()` which builds
 `ship_type_corrections.json` from `Ship Type` / `Ship Tier` annotations
 with non-empty `ml_name` — uploaded alongside the models.
 
-**How the time is shared out.** An icon classifier epoch took 12-15 min on
-the CPU runner at 13 600 crops (2026-09-27). Until then the job was capped
+**How the time is shared out.** An icon classifier epoch took 16-18 min on
+the CPU runner at 224 px and 13 600 crops (2026-09-27), and 6.2 min at
+128 px (2026-09-28, AMD EPYC 7763 — runners also come with the faster EPYC
+9V74, so print `lscpu` before comparing timings); at 128 a run converges in
+about 2-2.5 h, well inside the budget. Until then the job was capped
 at 60 min with a 50-min budget, which fitted 3-4 of the 30 epochs, and the
 budget was checked only before an epoch started: an epoch started just
 under the deadline ran the job past its cap during the upload, and two runs
@@ -395,22 +399,55 @@ other to publish; 330 min fits inside 6 h. The hourly cron never ran
 hourly anyway: GitHub delays and drops scheduled runs under load, and it
 started every 2-6 h in practice.
 
-Output files uploaded to `sets-sto/warp-knowledge/models/`:
+Output files uploaded to `sets-sto/warp-knowledge`:
 
 ```
-icon_classifier.pt          + label_map.json + icon_classifier_meta.json
-screen_classifier.pt        + screen_classifier_labels.json
-model_version.json          (trained_at, n_classes, val_acc, …)
-ship_type_corrections.json  (optional, only if any text corrections exist)
-training_manifest.json      (crop SHAs in this run + label_digest)
+models/in128/  icon_classifier.pt + label_map.json + icon_classifier_meta.json
+               model_version.json     (trained_at, n_classes, val_acc, …)
+               training_manifest.json (crop SHAs in this run + label_digest)
+models/        screen_classifier.pt + screen_classifier_labels.json
+               ship_type_corrections.json (only if any text corrections exist)
 ```
+
+### Icon models per input size
+
+The icon classifier and the embedder train at `MODEL_IMG_SIZE` = 128 px
+(`admin_train.py`; the embedder imports it) and are published under
+`ICON_MODELS_PATH` = `models/in128/`. `models/` keeps the last 224 px set
+and nothing writes icon models there any more.
+
+Why two folders: every client released before the input-size change
+hardcodes 224. Measured 2026-09-28 on 1 564 held-out crops through the
+client's own matcher, a 128 model fed 224 drops the embedder from 96.9 %
+to 72.6 % top-1 (the classifier from 94.9 % to 90.4 %), while fed 128 it
+matches the 224 model (96.2 % / 95.1 %). Those clients must therefore keep
+the 224 set rather than receive the new one; they stop getting icon-model
+updates until they update the client. A client that reads `input_size`
+asks `/model/version?input=128` and downloads from the `models_path` in
+the answer.
+
+Why 128: at 224 an epoch takes 16-18 min on the CPU runner and a run is
+cut off after ~15 epochs, before converging. Under equal conditions
+accuracy falls with size (224 > 160 > 128 > 96, ~0.3-0.65 points a step),
+but inside the 270-min budget 128 publishes what 224 did (87.25 % vs
+87.3 % mean validation) in about 2-2.5 h instead of 4.5.
+
+Reading the previous model — warm-start, publication guard, the nightly
+embedder's warm-start classifier — goes through `_hf_icon_model_file`: this
+size's folder first, `models/` while nothing has been published there yet,
+with a line in the log when the fallback is used. The training manifest
+is the exception and is read from `ICON_MODELS_PATH` only: the legacy one
+describes the last 224 run's crops, and matching it would skip the first
+128 run. `ICON_MODELS_PATH` and `main.MODELS_PATH_BY_INPUT` must agree;
+`tests/test_icon_models_path.py` checks that they do.
 
 ### ArcFace embedder (`admin_train_metric.py`)
 
 Separate workflow `train_metric_model.yml`, daily at 00:45 UTC. It
 overlaps the 00:00 classifier run, which is harmless: they run on separate
-runners and commit disjoint files to `models/`. A warm-started embedder
-starts from the classifier published before that run. Trains the gallery model used as a
+runners and commit disjoint files. A warm-started embedder starts from the
+classifier of its own size published before that run, and it publishes
+under `ICON_MODELS_PATH` too. Trains the gallery model used as a
 cross-check in the matcher priority chain. Outputs:
 `icon_embedder.pt`, `embedder_label_map.json`,
 `icon_embedder_meta.json`, `embedding_index.npz`.

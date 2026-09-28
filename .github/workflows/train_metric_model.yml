@@ -75,12 +75,11 @@ jobs:
           WARM_FLAG=""
           if [ "$WARM" = "true" ]; then
             if python -c "
-          from huggingface_hub import hf_hub_download
-          import os, shutil
-          local = hf_hub_download(
-              os.environ['HF_REPO_ID'], 'models/icon_classifier.pt',
-              repo_type='dataset', token=os.environ['HF_TOKEN'],
-          )
+          # The classifier of the size this embedder trains at; the legacy
+          # one only if that has not been published yet (says so when used).
+          from admin_train import _hf_icon_model_file
+          import shutil
+          local = _hf_icon_model_file('icon_classifier.pt')
           shutil.copy(local, '/tmp/warp_metric_out/icon_classifier.pt')
           print('Warm-start file copied:', local)
           "; then

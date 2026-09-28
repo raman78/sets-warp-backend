@@ -40,7 +40,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from admin_train import (  # noqa: E402
     HF_TOKEN, HF_DATASET, HF_REPO_ID,
-    IMG_SIZE, MODEL_IMG_SIZE,
+    IMG_SIZE, MODEL_IMG_SIZE, ICON_MODELS_PATH, _hf_icon_model_file,
     _require_hf, read_curated_crops,
     _create_commit_with_retry,
 )
@@ -695,10 +695,7 @@ def _published_embedder_meta() -> dict:
     teaching the shared guard about two spellings.
     """
     try:
-        from huggingface_hub import hf_hub_download
-        path = hf_hub_download(repo_id=HF_REPO_ID,
-                               filename='models/icon_embedder_meta.json',
-                               repo_type='dataset', token=HF_TOKEN or None)
+        path = _hf_icon_model_file('icon_embedder_meta.json')
         prev = json.loads(Path(path).read_text(encoding='utf-8'))
         return {'n_classes': prev.get('n_classes'),
                 'val_acc':   prev.get('val_recall@1')}
@@ -710,7 +707,7 @@ def _published_embedder_meta() -> dict:
 
 def _upload_embedder(models_dir: Path) -> bool:
     """Upload icon_embedder.pt + label_map.json + embedding_index.npz + meta to
-    sets-sto/warp-knowledge under models/. Mirrors admin_train._upload_model().
+    sets-sto/warp-knowledge under ICON_MODELS_PATH. Mirrors admin_train._upload_model().
     Files are placed alongside (not replacing) the softmax classifier files."""
     from huggingface_hub import HfApi, CommitOperationAdd
 
@@ -764,10 +761,10 @@ def _upload_embedder(models_dir: Path) -> bool:
 
     api = HfApi(token=HF_TOKEN)
     ops = [
-        CommitOperationAdd(path_in_repo='models/icon_embedder.pt',         path_or_fileobj=str(pt)),
-        CommitOperationAdd(path_in_repo='models/embedding_index.npz',      path_or_fileobj=str(idx)),
-        CommitOperationAdd(path_in_repo='models/icon_embedder_meta.json',  path_or_fileobj=str(meta)),
-        CommitOperationAdd(path_in_repo='models/embedder_label_map.json',  path_or_fileobj=str(lbl)),
+        CommitOperationAdd(path_in_repo=f'{ICON_MODELS_PATH}/icon_embedder.pt',         path_or_fileobj=str(pt)),
+        CommitOperationAdd(path_in_repo=f'{ICON_MODELS_PATH}/embedding_index.npz',      path_or_fileobj=str(idx)),
+        CommitOperationAdd(path_in_repo=f'{ICON_MODELS_PATH}/icon_embedder_meta.json',  path_or_fileobj=str(meta)),
+        CommitOperationAdd(path_in_repo=f'{ICON_MODELS_PATH}/embedder_label_map.json',  path_or_fileobj=str(lbl)),
     ]
     commit_msg = f'admin_train_metric: icon_embedder version={sha}'
     ok = _create_commit_with_retry(api, HF_REPO_ID, 'dataset', ops, commit_msg)

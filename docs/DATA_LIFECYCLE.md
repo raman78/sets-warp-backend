@@ -113,11 +113,12 @@ trainers, the audit) see [`technical_overview.md`](technical_overview.md).
           │  one HF commit per training run, atomic upload
           ▼
    HF Dataset: sets-sto/warp-knowledge
-   models/icon_classifier.pt        + label_map.json + …meta.json
+   models/in128/icon_classifier.pt  + label_map.json + …meta.json
+   models/in128/icon_embedder.pt    + embedder_label_map.json + .npz
+   models/in128/model_version.json  (trained_at, n_classes, val_acc)
    models/screen_classifier.pt      + screen_classifier_labels.json
-   models/icon_embedder.pt          + embedder_label_map.json + .npz
-   models/model_version.json        (trained_at, n_classes, val_acc)
    models/ship_type_corrections.json
+   models/icon_*, model_version.json  last 224 set, no longer written
    knowledge.json                   (pHash overrides)
           │
           ▼
@@ -179,7 +180,8 @@ the load-bearing simplification of the whole system:
 - The mergers only touch `sto-icon-dataset` (and `admin_merge.py` only
   touches `warp-knowledge` for the pHash table).
 - The trainers read `sto-icon-dataset/data/` and write to
-  `warp-knowledge/models/`.
+  `warp-knowledge/models/in128/` (icon models) and `warp-knowledge/models/`
+  (everything else).
 - The clients read both — `warp-knowledge` for models, the icon
   tarball release of `sto-icon-dataset` for cold-start crops.
 

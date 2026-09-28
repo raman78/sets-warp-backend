@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Changed
+- **The icon models train at 128 px and are published under
+  `models/in128/`.** At 224 an epoch took 16-18 min on the CPU runner and a
+  run was cut off after ~15 epochs, before converging; at 128 an epoch takes
+  6.2 min and a run converges in about 2-2.5 h, publishing what 224 did
+  inside the budget (87.25 % vs 87.3 % mean validation, measured
+  2026-09-28). `models/` keeps the last 224 set: clients older than the
+  input-size change feed 224, and a 128 model fed 224 drops the embedder
+  from 96.9 % to 72.6 %. The screen classifier, anchors and OCR corrections
+  stay under `models/`. The first 128 run warm-starts from, and is guarded
+  against, the current 224 model, and trains even though the legacy
+  manifest lists the same crops.
+
 ### Removed
 - **`POST /webhooks/hf-dataset`.** Added in March 2026, when a push to the
   dataset meant new training data; since the mergers, a push is only a new

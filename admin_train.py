@@ -11,7 +11,8 @@ Trains two models from community-contributed data:
    staging/<install_id>/screen_types/<TYPE>/<sha>.png
 
 Democratic voting: 1 install_id = 1 vote per sha, majority label wins.
-Both models uploaded to sets-sto/warp-knowledge/models/.
+Icon models uploaded to sets-sto/warp-knowledge/<ICON_MODELS_PATH>/,
+the screen classifier to models/.
 
 Requires torch, torchvision, cv2 — installed in the sets-warp venv, not here.
 Run from the sets-warp directory:
@@ -80,7 +81,17 @@ TEXT_LEARNING_SLOTS = frozenset({'Ship Type', 'Ship Tier', 'Ship Name'})
 # ── Training hyper-parameters (mirror local_trainer.py) ──────────────────────
 
 IMG_SIZE       = 64
-MODEL_IMG_SIZE = 224
+MODEL_IMG_SIZE = 128
+# Where the icon models (classifier, embedder, their meta, model_version.json,
+# training_manifest.json) are published. Tied to MODEL_IMG_SIZE: clients that
+# hardcode 224 read `models/`, and a 128 model fed 224 loses about 24 points
+# in the embedder (measured 2026-09-28), so `models/` keeps the last 224 set
+# and the 128 set lives beside it. Change both together, or neither. The
+# screen classifier, anchors and OCR corrections do not depend on it and stay
+# under `models/`.
+ICON_MODELS_PATH   = 'models/in128'
+LEGACY_MODELS_PATH = 'models'
+
 BATCH_SIZE     = 16
 MAX_EPOCHS     = 30
 LR             = 3e-4
@@ -103,9 +114,10 @@ SC_MAX_KEEP         = 150 # per screen-type: above SC_MIN_KEEP cap to this many
 # `train_central_model.yml` allows the job 330 min (GitHub's own cap is 360).
 # The icon classifier gets 270 of them; the screen classifier its own 8 plus
 # at most one epoch, then the upload. An epoch of the icon classifier took
-# 12-15 min on the CPU runner at 13 600 crops (2026-09-27), so the old
-# 50-min budget stopped it after 3-4 of MAX_EPOCHS, and an epoch started just
-# before the deadline ran the job past the 60-min cap before the upload.
+# 16-18 min on the CPU runner at 224 px and 13 600 crops (2026-09-27; 6.2 min
+# at 128 px), so the old 50-min budget stopped it after 3-4 of MAX_EPOCHS, and
+# an epoch started just before the deadline ran the job past the 60-min cap
+# before the upload.
 ICON_TRAIN_BUDGET_S = 270 * 60
 SC_TRAIN_BUDGET_S   = 8 * 60
 
@@ -331,13 +343,36 @@ def _published_model_version() -> dict:
     to compare against what users would actually be downgraded from.
     """
     try:
-        from huggingface_hub import hf_hub_download
-        path = hf_hub_download(repo_id=HF_REPO_ID, filename='models/model_version.json',
-                               repo_type='dataset', token=HF_TOKEN or None)
+        path = _hf_icon_model_file('model_version.json')
         return json.loads(Path(path).read_text(encoding='utf-8'))
     except Exception as e:
         log.warning(f'publication guard: no published version to compare against ({e})')
         return {}
+
+
+def _hf_icon_model_file(name: str) -> str:
+    """Local copy of the published icon-model file `name`.
+
+    The current set under ICON_MODELS_PATH first; the legacy set under
+    `models/` when the current one has not been published yet, which is what
+    lets the first run at a new size warm-start from, and be guarded against,
+    the model users have now. Raises when neither has it. Not for the
+    training manifest: the legacy one describes the legacy run's crops and
+    would make the first run at a new size skip itself.
+    """
+    from huggingface_hub import hf_hub_download
+    error: Exception | None = None
+    for base in (ICON_MODELS_PATH, LEGACY_MODELS_PATH):
+        try:
+            path = hf_hub_download(repo_id=HF_REPO_ID, filename=f'{base}/{name}',
+                                   repo_type='dataset', token=HF_TOKEN or None)
+        except Exception as e:
+            error = e
+            continue
+        if base != ICON_MODELS_PATH:
+            print(f'  {name}: nothing under {ICON_MODELS_PATH}/ yet — using {base}/')
+        return path
+    raise error
 
 
 def _publication_refusal(n_classes: int, val_acc: float, previous: dict) -> str:
@@ -372,7 +407,8 @@ def _upload_model(models_dir: Path, n_classes: int, val_acc: float,
                   n_samples: int, n_users: int,
                   sc_val_acc: float | None = None,
                   sc_n_samples: int = 0) -> bool:
-    """Upload icon + screen model files to sets-sto/warp-knowledge under models/."""
+    """Upload the icon model files under ICON_MODELS_PATH and the screen
+    classifier under models/ in sets-sto/warp-knowledge."""
     from huggingface_hub import HfApi, CommitOperationAdd
     api = HfApi(token=HF_TOKEN)
 
@@ -414,14 +450,14 @@ def _upload_model(models_dir: Path, n_classes: int, val_acc: float,
 
     manifest_path = models_dir / 'training_manifest.json'
     ops = [
-        CommitOperationAdd(path_in_repo='models/icon_classifier.pt',        path_or_fileobj=str(pt_path)),
-        CommitOperationAdd(path_in_repo='models/label_map.json',            path_or_fileobj=str(label_path)),
-        CommitOperationAdd(path_in_repo='models/icon_classifier_meta.json', path_or_fileobj=str(meta_path)),
-        CommitOperationAdd(path_in_repo='models/model_version.json',        path_or_fileobj=str(version_path)),
+        CommitOperationAdd(path_in_repo=f'{ICON_MODELS_PATH}/icon_classifier.pt',        path_or_fileobj=str(pt_path)),
+        CommitOperationAdd(path_in_repo=f'{ICON_MODELS_PATH}/label_map.json',            path_or_fileobj=str(label_path)),
+        CommitOperationAdd(path_in_repo=f'{ICON_MODELS_PATH}/icon_classifier_meta.json', path_or_fileobj=str(meta_path)),
+        CommitOperationAdd(path_in_repo=f'{ICON_MODELS_PATH}/model_version.json',        path_or_fileobj=str(version_path)),
     ]
     if manifest_path.exists():
         ops.append(CommitOperationAdd(
-            path_in_repo='models/training_manifest.json',
+            path_in_repo=f'{ICON_MODELS_PATH}/training_manifest.json',
             path_or_fileobj=str(manifest_path),
         ))
     # Include screen classifier if trained
@@ -1282,7 +1318,10 @@ def _label_digest(winner_labels: dict) -> str:
 
 
 def _load_training_manifest() -> tuple[set[str], str]:
-    """Download models/training_manifest.json from HF.
+    """Download <ICON_MODELS_PATH>/training_manifest.json from HF.
+
+    Never the legacy one: it describes the crops of the last run at the
+    previous size, and matching it would skip the first run at this size.
 
     Returns (crop SHAs used last time, label digest). The digest is '' for a
     manifest written before it existed — the caller then compares SHAs alone,
@@ -1292,7 +1331,7 @@ def _load_training_manifest() -> tuple[set[str], str]:
     try:
         from huggingface_hub import hf_hub_download
         local = hf_hub_download(
-            HF_REPO_ID, 'models/training_manifest.json',
+            HF_REPO_ID, f'{ICON_MODELS_PATH}/training_manifest.json',
             repo_type='dataset', token=HF_TOKEN or None,
         )
         data = json.loads(Path(local).read_text(encoding='utf-8'))
@@ -1441,8 +1480,7 @@ Environment (.env or env vars in CI):
 
         prev_icon_pt = tmpdir / 'prev_icon_classifier.pt'
         try:
-            _local = _hf_dl(HF_REPO_ID, 'models/icon_classifier.pt',
-                             repo_type='dataset', token=HF_TOKEN or None)
+            _local = _hf_icon_model_file('icon_classifier.pt')
             _shutil.copy2(_local, prev_icon_pt)
             print('Previous icon_classifier.pt downloaded for fine-tuning.')
         except Exception as _e:
@@ -1502,7 +1540,7 @@ Environment (.env or env vars in CI):
         ok = _upload_model(models_dir, len(label_counts), val_acc, n_samples, n_users_proxy,
                            sc_val_acc=sc_val_acc, sc_n_samples=sc_n_samples)
         if ok:
-            print(f'\nDone — models published to {HF_REPO_ID}/models/ ({_clock()})')
+            print(f'\nDone — models published to {HF_REPO_ID}/{ICON_MODELS_PATH}/ ({_clock()})')
         else:
             print('\nERROR — upload failed.', file=sys.stderr)
             sys.exit(1)
