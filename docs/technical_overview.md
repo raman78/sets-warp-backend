@@ -67,6 +67,7 @@ chain together.
 | Staging audit | Read-only orphan check, monthly cron | `admin_audit_staging.py` |
 | One-shot drain | Manual cleanup when audit breaches | `admin_drain_stale_staging.py` |
 | Knowledge scrubber | Removes confirmed-bad pHash entries | `admin_scrub_knowledge.py` |
+| Vote rebuild | One-shot: builds `voters` (schema 4) from contribution history | `admin_rebuild_votes.py` |
 | Label scrubber | Removes confirmed-bad crop labels | `admin_clean_labels.py` |
 | Virtual-crop review | Reject/relabel colourful `__empty__` crops + GUI | `admin_reject_crops.py`, `admin_console.py` |
 | Virtual-poison audit | Read-only unreviewed-poison count, monthly cron | `admin_audit_virtual_poison.py` |
@@ -210,23 +211,35 @@ threshold = min_votes if key in existing else 1
 accepted  = count >= threshold
 ```
 
-### pHash: the tally is kept, and a hash may carry several names
+### pHash: one vote per install, kept, and a hash may carry several names
 
-`admin_merge.py` stores a running tally in `knowledge.json` under `votes`,
-phash → {name: votes}. Each run adds its new contributions to that tally,
-so a vote counted once keeps counting. Before 2026-09-25 the merger tallied
-only the contributions that arrived since its last run, then marked them
-processed, and the per-run minority (`losers`) was overwritten every run.
-A dissent that fell short was never seen again, and overturning an entry
-needed two matching votes inside one two-hour window. Measured against the
-live repo that day: 205 processed contributions disagreed with the table,
-all of them forgotten.
+`admin_merge.py` keeps every install's vote in `knowledge.json` under
+`voters` (schema 4): phash → {install_id: [name, timestamp]}. An install has
+**one** vote per hash, its latest. Voting again replaces the earlier vote,
+and an older vote never replaces a newer one, so processing the same
+contribution twice, or two runs out of order, changes nothing. A vote for a
+virtual class (`__inactive__`, …) is recorded too: it counts for no name,
+but it withdraws what that install voted before. `votes`, phash → {name:
+installs}, is derived from `voters` on every save and is what clients read.
 
-An entry changes when a challenger has **more** votes than the current
+How it got here. Before 2026-09-25 the merger tallied only the contributions
+that arrived since its last run, then marked them processed, so a dissent
+that fell short was never seen again (205 of them that day). The tally that
+fixed it (schema 3) counted contribution *files*: one install had voted the
+same name for one hash 27 times, and 1,205 of 4,710 (install, hash) pairs
+carried repeats, up to 40. Recounting the old files that way would have
+flipped entries on one install's repetition alone. Schema 4 was built once
+by `admin_rebuild_votes.py` from every contribution in the repo's git
+history, leaving out the votes a scrub had removed; under one vote per
+install it changed 4 entries, each backed by two or more installs.
+`admin_merge.py` refuses to run over a file without `voters`.
+
+An entry changes when a challenger has **more** installs than the current
 name and at least `--min`. A tie keeps the current name. A phash with no
-entry takes its leader on one vote. Entries written before the tally
-existed start at one vote for their current name; the votes that made them
-were not kept.
+entry takes its leader on one vote. An entry no install currently votes a
+real name for counts one vote for its current name. After the rebuild, 44
+entries were in a nearby state: every install that voted on them now votes
+another name, but no other name has reached `--min`, so the entry stays.
 
 The tally keeps every name because a hash does not identify one picture.
 One live hash carried votes for five different items: a console, a trait,
@@ -234,8 +247,8 @@ a beam bank and two others. So `knowledge` holds the leader for clients
 that read a single name, and `GET /knowledge` also returns `votes`. A
 client that reads it picks, among the names a hash was voted for, the one
 whose pictures the crop resembles (sto-warp `docs/ML_PIPELINE.md` §6).
-`admin_scrub_knowledge.py` removes a scrubbed name from the tally as well
-as from the map, or its old votes would restore it.
+`admin_scrub_knowledge.py` removes a scrubbed name from `voters` and `votes`
+as well as from the map, or its old votes would restore it.
 
 ### The embedder's gallery must be spread out
 
@@ -307,6 +320,12 @@ HfApi().create_commit(operations=ops, …)
 This keeps steady-state staging size bounded by `per_install_uploads ×
 2 h` — the merger cadence. Lifetime contributions accumulate in
 `data/`, not in staging.
+
+`admin_merge.py` drains more than its promotions: every contribution whose
+vote is now in `voters`, a SKIP included (`_contributions_to_drain`). The
+file is marked processed and never read again, so keeping it preserved
+nothing. Until 2026-10-01 SKIPs stayed on disk, and they were 671 of the
+orphans that failed that month's audit.
 
 ### Poison filter
 
@@ -489,13 +508,26 @@ Exit code 1 if any threshold is breached; the workflow then fails the
 scheduled run and GitHub emails the repo owner. No auto-fix —
 surfacing the anomaly forces a root-cause look.
 
+A processed contribution is one listed in `processed_contributions` **or**
+dated before `watermark_date`: `admin_merge` compacts old IDs out of the
+list and treats everything older than the watermark as processed. The
+audit and the drain share one planner (`_plan_contributions_drain`) that
+counts both. Until 2026-10-01 it read only the list, and 2,500 files from
+March and early April were on disk, invisible to both.
+
+The audit only became able to fail in September: its step piped through
+`tee` without `pipefail`, so the 2026-09-01 breach (crops 3016, screens
+354, contributions 386) was green.
+
 ### One-shot drain (`admin_drain_stale_staging.py`)
 
 `drain_stale_staging.yml` is **workflow_dispatch only — no cron**. It
 is reserved for the case where the audit flagged a breach, the cause
 has been understood and patched, and the leaked orphans need to be
 mopped up by hand. Scheduling it would silently paper over merger
-bugs; the manual gate is deliberate.
+bugs; the manual gate is deliberate. It refuses to delete contributions
+while `knowledge.json` has no `voters`: before schema 4 a processed file
+could be the only record of its vote.
 
 ### Virtual-poison audit (`admin_audit_virtual_poison.py`)
 

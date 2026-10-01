@@ -18,8 +18,11 @@ Drain rule (content-addressed, idempotent):
     crops          — staging/<iid>/crops/<sha>.png        DROP if sha in data/annotations.jsonl
                      staging/<iid>/annotations.jsonl      TRIM lines whose sha is promoted
     screens        — staging/<iid>/screen_types/<T>/*.png DROP if sha in data/screen_types/metadata.jsonl
-    contributions  — contributions/<date>/<id>.json       DROP if id in knowledge.json::processed_contributions
+    contributions  — contributions/<date>/<id>.json       DROP if id in knowledge.json::processed_contributions,
+                                                          or <date> is before its watermark_date
                      contributions/<date>/<id>.png        DROP companion crop
+                     Refused until knowledge.json carries `voters` (schema 4): before
+                     that a processed file may be the only record of its vote.
     anchors        — staging/<iid>/anchors_grid_*.json    OPT-IN (--include-anchors) — staging anchor
                      files aggregate multiple votes; only drain when explicitly requested
                      and the (build_type, aspect_bucket) already has a consensus file.
@@ -102,8 +105,13 @@ def _load_jsonl_field(api, repo_id: str, path: str, key: str) -> set[str]:
     return out
 
 
-def _load_knowledge_processed(api) -> set[str]:
-    """Read knowledge.json::processed_contributions as a set of IDs."""
+def _load_knowledge_processed(api) -> tuple[set[str], str, bool]:
+    """Read what knowledge.json says admin_merge has processed.
+
+    Returns (processed_contributions IDs, watermark_date, has_voters).
+    `has_voters` is whether the file records every install's vote (schema 4);
+    only then is a processed contribution file redundant.
+    """
     from huggingface_hub import hf_hub_download
     try:
         local = hf_hub_download(
@@ -112,10 +120,12 @@ def _load_knowledge_processed(api) -> set[str]:
         )
     except Exception as e:
         print(f'  knowledge.json unavailable ({e}) — treating as empty.')
-        return set()
+        return set(), '', False
     data = json.loads(Path(local).read_text(encoding='utf-8'))
     ids  = data.get('processed_contributions', [])
-    return set(ids) if isinstance(ids, list) else set()
+    return (set(ids) if isinstance(ids, list) else set(),
+            str(data.get('watermark_date') or ''),
+            isinstance(data.get('voters'), dict))
 
 
 def _load_anchor_keys(api, repo_files: list[str]) -> set[tuple[str, str]]:
@@ -243,15 +253,21 @@ def _plan_anchors_drain(
 
 
 def _plan_contributions_drain(
-    repo_files: list[str], processed_ids: set[str],
+    repo_files: list[str], processed_ids: set[str], watermark_date: str = '',
 ) -> list[str]:
-    """contributions/<date>/<id>.json (+ companion .png) for processed IDs."""
+    """contributions/<date>/<id>.json (+ companion .png) that admin_merge has
+    processed: listed in processed_contributions, or dated before
+    watermark_date. admin_merge compacts old IDs out of the list and treats
+    everything before the watermark as processed — 2,500 such files were on
+    disk on 2026-10-01, invisible to a check of the list alone.
+    """
     drops: list[str] = []
     for f in repo_files:
         if not (f.startswith('contributions/') and f.endswith('.json')):
             continue
-        cid = Path(f).stem
-        if cid in processed_ids:
+        cid  = Path(f).stem
+        date = Path(f).parent.name
+        if cid in processed_ids or (watermark_date and date < watermark_date):
             drops.append(f)
             png = f[:-5] + '.png'
             if png in repo_files:
@@ -347,10 +363,17 @@ def main() -> int:
 
     print(f'== Knowledge repo: {HF_KNOW}')
     know_files     = _list_repo_files(api, HF_KNOW, 'dataset')
-    processed_ids  = _load_knowledge_processed(api)
+    processed_ids, watermark, has_voters = _load_knowledge_processed(api)
     print(f'   {len(know_files)} paths listed, '
-          f'{len(processed_ids)} processed contribution IDs.')
-    contrib_drops  = _plan_contributions_drain(know_files, processed_ids)
+          f'{len(processed_ids)} processed contribution IDs, '
+          f'watermark_date={watermark or "(none)"}.')
+    contrib_drops  = _plan_contributions_drain(know_files, processed_ids, watermark)
+    if contrib_drops and not has_voters:
+        print(f'   contributions: REFUSED — {sum(1 for p in contrib_drops if p.endswith(".json"))} '
+              f'processed files, but knowledge.json has no `voters` (schema < 4), so '
+              f'some of them are the only record of their vote. Run '
+              f'admin_rebuild_votes.py --apply first.')
+        contrib_drops = []
     print(f'   contributions: {len(contrib_drops)} files to delete '
           f'({sum(1 for p in contrib_drops if p.endswith(".json"))} JSON + '
           f'{sum(1 for p in contrib_drops if p.endswith(".png"))} PNG)')

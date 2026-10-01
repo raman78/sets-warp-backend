@@ -3,6 +3,24 @@
 ## [Unreleased]
 
 ### Changed
+- **A pHash vote counts once per install.** `knowledge.json` (schema 4)
+  keeps `voters`, each install's latest vote per hash; `votes`, which
+  clients read, is now the number of installs per name, in the same shape.
+  The tally counted contribution files: one install had voted one name for
+  one hash 27 times, and 1,205 of 4,710 (install, hash) pairs carried
+  repeats. A vote for a virtual class withdraws the install's earlier vote.
+  `admin_merge.py` refuses to run over a file without `voters`; the new
+  one-shot `admin_rebuild_votes.py` builds it from every contribution in the
+  repo's history, leaving out votes a scrub removed. Its dry run changes 4
+  entries, each backed by two or more installs.
+- **`admin_merge.py` drains a SKIP's contribution file too.** Its vote is
+  recorded, and nothing reads the file again; kept, SKIPs were 671 orphans
+  in the 2026-10-01 staging audit.
+- **The staging audit and the drain see contributions older than the
+  watermark.** `admin_merge` treats them as processed, but the planner read
+  only the processed list, so 2,500 files from March-April 2026 were
+  invisible to both. The drain refuses to delete contributions until
+  `voters` exists.
 - **The icon models train at 128 px and are published under
   `models/in128/`.** At 224 an epoch took 16-18 min on the CPU runner and a
   run was cut off after ~15 epochs, before converging; at 128 an epoch takes
@@ -40,6 +58,10 @@
   days.
 
 ### Fixed
+- **No test can write to the HF Hub.** `tests/conftest.py` makes every
+  `HfApi` write raise. On 2026-10-01 a test reached admin_merge's real save
+  with the token from `.env`, overwrote `knowledge.json` and deleted 1,024
+  contribution files; both were restored from history the same hour.
 - **The virtual-poison audit runs again.** Since 2026-09-18 its workflow
   installed sto-warp with `pip`, but every sto-warp release requires Python
   3.14 and the runner has 3.11, so the 2026-10-01 run failed at install and

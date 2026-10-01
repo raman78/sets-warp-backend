@@ -169,14 +169,16 @@ def _hf_list_contributions(
     return contribs, new_ids, all_paths
 
 
-def _hf_load_state() -> tuple[dict[str, str], set[str], str, dict[str, dict[str, int]]]:
+def _hf_load_state() -> tuple[dict[str, str], set[str], str, dict[str, dict[str, list[str]]] | None]:
     """
     Loads the current knowledge.json from HF.
 
-    Returns (knowledge, processed_contribution_ids, watermark_date, votes).
-    Backwards-compatible with old knowledge.json files that lack the
-    processed_contributions / watermark_date / votes fields — all default to
-    empty; `merge` seeds missing votes from the knowledge map itself.
+    Returns (knowledge, processed_contribution_ids, watermark_date, voters).
+    `voters` is None when the file is from before schema 4: it then carries
+    only bare vote counts, which cannot tell one install voting ten times
+    from ten installs. `main` refuses to merge over such a file — writing
+    it back would lose nothing visible and count every repeat vote again.
+    A missing knowledge.json starts from scratch with empty voters.
     """
     try:
         from huggingface_hub import hf_hub_download
@@ -196,10 +198,10 @@ def _hf_load_state() -> tuple[dict[str, str], set[str], str, dict[str, dict[str,
             knowledge = {}
         processed = set(data.get('processed_contributions', [])) if isinstance(data, dict) else set()
         watermark = data.get('watermark_date', '') if isinstance(data, dict) else ''
-        votes = data.get('votes', {}) if isinstance(data, dict) else {}
-        if not isinstance(votes, dict):
-            votes = {}
-        return knowledge, processed, watermark, votes
+        voters = data.get('voters') if isinstance(data, dict) else None
+        if not isinstance(voters, dict):
+            voters = None
+        return knowledge, processed, watermark, voters
     except Exception as e:
         print(f'NOTICE: knowledge.json does not exist or error occurred ({e}) — starting from scratch')
         return {}, set(), '', {}
@@ -250,21 +252,22 @@ def _hf_save_state(
     knowledge:        dict[str, str],
     processed_ids:    list[str],
     watermark_date:   str,
-    votes:            dict[str, dict[str, int]] | None = None,
+    voters:           dict[str, dict[str, list[str]]],
     drain_contribs:   list[Path] | None              = None,
 ) -> bool:
-    """Save knowledge.json + (optionally) drain promoted contributions in a
+    """Save knowledge.json + (optionally) drain counted contributions in a
     single atomic HF commit.
 
-    `votes` is the running tally, phash → {name: votes}, persisted so that a
-    vote counted once is never forgotten. It replaced `losers`, which held
-    only the current run's minority and was overwritten every run. The
-    runtime `knowledge` map stays a plain `phash → name` (the tally's winner)
-    to preserve the client API contract.
+    `voters` is the record every decision is made from: phash →
+    {install_id: [name, timestamp]}, each install's latest vote. `votes`,
+    phash → {name: installs}, is derived from it on every save and kept for
+    clients, which read it as `GET /knowledge` returns it. The runtime
+    `knowledge` map stays a plain `phash → name` (the tally's winner) to
+    preserve the client API contract.
 
     D-G.9: `drain_contribs` is a list of paths on the local snapshot pointing
-    at contribution files whose phash made consensus. Both `<uuid>.json` and
-    `<uuid>.png` get a CommitOperationDelete in the same commit as the
+    at contribution files whose vote is now in `voters`. Both `<uuid>.json`
+    and `<uuid>.png` get a CommitOperationDelete in the same commit as the
     knowledge.json write — no half-applied state.
     """
     try:
@@ -274,15 +277,15 @@ def _hf_save_state(
         import io as _io
         api = HfApi(token=HF_TOKEN)
         payload_obj = {
-            'schema_version':           3,
+            'schema_version':           4,
             'knowledge':                knowledge,
             'updated_at':               datetime.now(UTC).isoformat() + 'Z',
             'entries':                  len(knowledge),
             'processed_contributions':  processed_ids,
             'watermark_date':           watermark_date,
+            'votes':                    votes_from_voters(voters, knowledge),
+            'voters':                   voters,
         }
-        if votes:
-            payload_obj['votes'] = votes
         payload = json.dumps(payload_obj, ensure_ascii=False, indent=2).encode('utf-8')
 
         ops: list = [CommitOperationAdd(
@@ -308,7 +311,7 @@ def _hf_save_state(
             api, HF_REPO_ID, 'dataset', ops,
             (f'admin_merge: {len(knowledge)} entries, '
              f'{len(processed_ids)} tracked, '
-             f'drained {deleted // 2} promoted contribs '
+             f'drained {deleted // 2} counted contribs '
              f'({datetime.now(UTC).strftime("%Y-%m-%d %H:%M")} UTC)'),
         )
         return True
@@ -329,78 +332,129 @@ def _is_poison_name(name: str) -> bool:
     return name.startswith('__') or name == 'Test Item Name'
 
 
+def _tally(
+    voters:   dict[str, dict[str, list[str]]],
+    existing: dict[str, str],
+) -> dict[str, Counter]:
+    """phash → Counter(name → installs whose latest vote it is).
+
+    `voters` also records virtual-class votes (a withdrawal); they count for
+    no name. An entry no install currently votes a real name for — nobody
+    recorded, or every voter withdrawn — counts one vote for its current
+    name, so it stays until a challenger reaches `--min`. None existed after
+    the 2026-10-01 rebuild.
+    """
+    tally: dict[str, Counter] = {
+        ph: Counter(v[0] for v in by.values() if not _is_poison_name(v[0]))
+        for ph, by in voters.items()
+    }
+    for ph, name in existing.items():
+        if not _is_poison_name(name) and not tally.get(ph):
+            tally[ph] = Counter({name: 1})
+    return tally
+
+
+def votes_from_voters(
+    voters:   dict[str, dict[str, list[str]]],
+    existing: dict[str, str],
+) -> dict[str, dict[str, int]]:
+    """The `votes` map clients read: phash → {name: installs}, leader first."""
+    return {ph: dict(names.most_common())
+            for ph, names in _tally(voters, existing).items() if names}
+
+
 def merge(
     contribs:   list[dict],
     existing:   dict[str, str],
     min_votes:  int = 2,
     verbose:    bool = False,
-    votes:      dict[str, dict[str, int]] | None = None,
-) -> tuple[dict[str, str], list[dict], dict[str, dict[str, int]], dict[str, set[str]]]:
+    voters:     dict[str, dict[str, list[str]]] | None = None,
+) -> tuple[dict[str, str], list[dict], dict[str, dict[str, list[str]]], dict[str, set[str]]]:
     """
-    Majority-vote merge over a tally that is never forgotten.
+    Majority vote of installs, over a record that is never forgotten.
 
-    `votes` is the tally carried in knowledge.json, phash → {name: votes}.
-    Every contribution in this run is added to it, so a vote counted once
-    keeps counting: until 2026-09-25 each run tallied only its own new
-    contributions and then marked them processed, so a dissenting vote that
-    fell short was never seen again, and changing an entry needed two
-    matching votes inside one run.
+    `voters` is carried in knowledge.json: phash → {install_id: [name,
+    timestamp]}, each install's latest vote. An install has one vote per
+    phash. Voting again replaces its earlier vote, and an older vote never
+    replaces a newer one, so processing the same contribution twice, or two
+    runs out of order, changes nothing. Until 2026-10-01 the tally counted
+    contribution files: one install had voted the same name for one hash 27
+    times, and recounting the old files would have flipped entries on such
+    repeats alone.
+
+    The record outlives the runs: until 2026-09-25 each run tallied only its
+    own new contributions and then marked them processed, so a dissenting
+    vote that fell short was never seen again.
 
     A hash does not identify one picture — measured 2026-09-25, one hash
     carried votes for five different items — so the tally keeps every name
     it has been given. `knowledge` keeps the leader for clients that read a
     single name; clients that read `votes` choose among the names by picture.
 
-    The entry changes when a challenger has strictly more votes than the
+    The entry changes when a challenger has strictly more installs than the
     current name and at least `min_votes`. A tie keeps the current name. A
-    phash with no entry takes its leader on one vote. Entries with no tally
-    yet (knowledge.json written before the tally existed) start at one vote
-    for their current name — the votes that produced them were not kept.
+    phash with no entry takes its leader on one vote.
 
-    Returns (merged_knowledge, report_rows, votes, contribs_by_phash):
+    Returns (merged_knowledge, report_rows, voters, contribs_by_phash):
       - merged_knowledge[phash]   → leading name (string — runtime API contract).
       - report_rows               → display dicts (for printing + summary stats).
-      - votes[phash]              → the updated tally, {name: votes}.
-      - contribs_by_phash[phash]  → set of contribution_id whose vote landed
-        on that phash. The drain (D-G.9) uses this to issue
-        CommitOperationDelete for every uuid that contributed to a promoted
-        phash, draining contributions/ after consensus.
+      - voters[phash]             → the updated record, {install_id: [name, ts]}.
+      - contribs_by_phash[phash]  → set of contribution_id whose vote is now
+        in `voters`. The drain (D-G.9) deletes exactly these files: once the
+        vote is recorded, nothing reads the file again.
     """
-    tally: dict[str, Counter] = {
-        ph: Counter({n: int(v) for n, v in names.items() if not _is_poison_name(n)})
-        for ph, names in (votes or {}).items()
-    }
-    for ph, name in existing.items():
-        if not _is_poison_name(name) and not tally.get(ph):
-            tally[ph] = Counter({name: 1})
+    voters = {ph: {iid: list(v) for iid, v in by.items()}
+              for ph, by in (voters or {}).items()}
 
-    # Add this run's votes
+    # Add this run's votes, oldest first, so an install's latest vote wins
     phash_meta:  dict[str, dict]    = {}   # phash → {total, confirmed, wrong_names}
     contribs_by_phash: dict[str, set[str]] = {}
+    no_install: list[str] = []
 
-    for c in contribs:
-        if not isinstance(c, dict):
-            continue
+    for c in sorted((c for c in contribs if isinstance(c, dict)),
+                    key=lambda c: str(c.get('timestamp') or '')):
         ph   = c.get('phash', '').strip()
         name = c.get('item_name', '').strip()
         if not ph or not name:
             continue
-        if _is_poison_name(name):
+        iid = (c.get('install_id') or '').strip()
+        if not iid:
+            # /contribute requires install_id, so this is a malformed file.
+            # Without a voter it cannot be counted once and only once.
+            no_install.append((c.get('contribution_id') or '?').strip())
             continue
 
-        tally.setdefault(ph, Counter())[name] += 1
+        at   = str(c.get('timestamp') or '')
+        prev = voters.setdefault(ph, {}).get(iid)
+        if prev is None or at >= prev[1]:
+            voters[ph][iid] = [name, at]
+        cid = (c.get('contribution_id') or '').strip()
+        if cid:
+            contribs_by_phash.setdefault(ph, set()).add(cid)
         meta = phash_meta.setdefault(ph, {'total': 0, 'confirmed': 0,
                                           'wrong': Counter(), 'names': Counter()})
         meta['total'] += 1
+        if _is_poison_name(name):
+            # A virtual class never counts for a name (`_tally` leaves it
+            # out), but it is still the install's latest word on this hash
+            # and withdraws whatever it voted before. Measured 2026-10-01:
+            # an install voted "Charged Particle Burst" once and
+            # `__inactive__` after it; dropping the virtual vote here kept
+            # the withdrawn one alive and made it a NEW entry.
+            continue
         meta['names'][name] += 1
         if c.get('confirmed'):
             meta['confirmed'] += 1
         wrong = c.get('wrong_name', '').strip()
         if wrong:
             meta['wrong'][wrong] += 1
-        cid = (c.get('contribution_id') or '').strip()
-        if cid:
-            contribs_by_phash.setdefault(ph, set()).add(cid)
+
+    if no_install:
+        print(f'WARNING: {len(no_install)} contribution(s) carry no install_id '
+              f'and were not counted: {", ".join(sorted(no_install)[:10])}'
+              f'{" …" if len(no_install) > 10 else ""}')
+
+    tally = _tally(voters, existing)
 
     # Drop already-merged poison entries (legacy data from before the filter
     # existed). This rewrites knowledge.json to a clean state on next merge.
@@ -416,6 +470,8 @@ def merge(
         names         = tally[ph]
         meta          = phash_meta[ph]
         old_name      = merged.get(ph, '')
+        if not names:
+            continue   # only virtual-class votes, and no entry to keep
         leader, count = names.most_common(1)[0]
 
         if not old_name:
@@ -424,7 +480,7 @@ def merge(
         elif leader == old_name or count <= names[old_name]:
             # The current name stays (a tie keeps it). A run that also
             # carried another name is a dissent that has not won yet: its
-            # vote is in the tally, and its contribution is not drained.
+            # vote is in `voters` and keeps counting.
             dissent = any(n != old_name for n in meta['names'])
             action = 'SKIP' if dissent else 'unchanged'
             leader, count = old_name, names[old_name]
@@ -449,8 +505,43 @@ def merge(
         if verbose or action in ('NEW', 'UPDATE', 'SKIP'):
             _print_row(row)
 
-    out_votes = {ph: dict(names.most_common()) for ph, names in tally.items() if names}
-    return merged, report, out_votes, contribs_by_phash
+    return merged, report, voters, contribs_by_phash
+
+
+def _contributions_to_drain(
+    contribs:          list[dict],
+    contribs_by_phash: dict[str, set[str]],
+    all_paths:         list[Path],
+) -> list[Path]:
+    """Contribution files this run makes redundant (D-G.9).
+
+    Every contribution whose vote is now in `voters` — a SKIP as well as a
+    promotion. The file is marked processed and never read again, so keeping
+    it preserved nothing, and it was exactly what the staging audit counts as
+    an orphan: 671 of them on 2026-10-01, when only promotions were drained.
+    """
+    counted_cids: set[str] = set()
+    for cids in contribs_by_phash.values():
+        counted_cids |= cids
+    drain_paths = [p for p in all_paths if p.stem in counted_cids]
+
+    # A contribution naming a virtual class can never enter knowledge.json
+    # — `_is_poison_name` refuses it unconditionally, by design, because a
+    # pHash override to `__empty__` would turn real icons into empty slots
+    # at confidence 1.0. One with an install is counted above, as that
+    # install's withdrawal; one without is refused here, because leaving it
+    # on disk is how a bucket of files nothing will ever read accumulates
+    # until somebody runs a script.
+    refused_ids = {(c.get('contribution_id') or '').strip()
+                   for c in contribs
+                   if _is_poison_name((c.get('item_name') or '').strip())}
+    refused = [p for p in all_paths
+               if p.stem in refused_ids and p.stem not in counted_cids]
+    if refused:
+        print(f'Draining {len(refused)} contribution(s) whose label can '
+              f'never enter knowledge.json.')
+        drain_paths += refused
+    return drain_paths
 
 
 def _print_row(row: dict):
@@ -490,7 +581,7 @@ Environment variables (.env):
     parser.add_argument('--apply',   action='store_true',
                         help='Save result to HF (default: dry-run)')
     parser.add_argument('--min',     type=int, default=2, metavar='N',
-                        help='Minimum number of votes (default: 2)')
+                        help='Installs a challenger needs to change an entry (default: 2)')
     parser.add_argument('--since',   metavar='YYYY-MM-DD',
                         help='Include contributions only from this date onwards')
     parser.add_argument('--verbose', action='store_true',
@@ -509,10 +600,17 @@ Environment variables (.env):
     print('=' * 60)
 
     # 1. Load current state (knowledge + processed contribution IDs + watermark)
-    existing, processed_ids, watermark, votes = _hf_load_state()
+    existing, processed_ids, watermark, voters = _hf_load_state()
     print(f'Current knowledge.json: {len(existing)} entries, '
           f'{len(processed_ids)} tracked contribution IDs, '
           f'watermark_date={watermark or "(none)"}\n')
+    if voters is None:
+        print('ERROR: knowledge.json has no `voters` (schema < 4). Its vote '
+              'counts cannot tell repeat votes from separate installs, and '
+              'merging over them would keep counting every repeat. Run '
+              '`admin_rebuild_votes.py --apply` once to rebuild voters from '
+              'the contribution history.', file=sys.stderr)
+        sys.exit(1)
 
     # 2. List contributions, filtered to NEW ones only.
     contribs, new_ids, all_paths = _hf_list_contributions(
@@ -530,9 +628,9 @@ Environment variables (.env):
     print(f'\nLoaded {len(contribs)} new contributions ({confirmed} confirmed)\n')
 
     # 3. Merge
-    merged, report, votes, contribs_by_phash = merge(
+    merged, report, voters, contribs_by_phash = merge(
         contribs, existing, min_votes=args.min, verbose=args.verbose,
-        votes=votes,
+        voters=voters,
     )
 
     # 4. Report
@@ -576,32 +674,7 @@ Environment variables (.env):
             updated_processed, watermark, all_paths,
         )
 
-        # D-G.9: identify which on-disk contribution files belong to a
-        # promoted phash so we can delete them in the same commit. SKIP
-        # contributions stay on disk; their vote is already in `votes`, so it
-        # keeps counting even though the file is never read again.
-        promoted_phashes = {r['phash'] for r in report
-                            if r['action'] in ('NEW', 'UPDATE', 'unchanged')}
-        promoted_cids: set[str] = set()
-        for ph in promoted_phashes:
-            promoted_cids |= contribs_by_phash.get(ph, set())
-        drain_paths = [p for p in all_paths if p.stem in promoted_cids]
-
-        # A contribution naming a virtual class can never enter knowledge.json
-        # — `_is_poison_name` refuses it unconditionally, by design, because a
-        # pHash override to `__empty__` would turn real icons into empty slots
-        # at confidence 1.0. It is therefore not pending a second vote like a
-        # SKIP: it is refused, and leaving it on disk is how a bucket of files
-        # nothing will ever read accumulates until somebody runs a script.
-        refused_ids = {(c.get('contribution_id') or '').strip()
-                       for c in contribs
-                       if _is_poison_name((c.get('item_name') or '').strip())}
-        refused = [p for p in all_paths
-                   if p.stem in refused_ids and p.stem not in promoted_cids]
-        if refused:
-            print(f'Draining {len(refused)} contribution(s) whose label can '
-                  f'never enter knowledge.json.')
-            drain_paths += refused
+        drain_paths = _contributions_to_drain(contribs, contribs_by_phash, all_paths)
 
         if new_count == 0 and update_count == 0 and new_watermark == watermark and not drain_paths:
             # Same knowledge, same watermark — still worth writing back to
@@ -611,10 +684,10 @@ Environment variables (.env):
         else:
             print(f'\nSaving {len(merged)} entries to HF '
                   f'(tracked IDs: {len(compacted_ids)}, watermark: {new_watermark or "(none)"}, '
-                  f'draining {len(drain_paths)} promoted contributions)...')
+                  f'draining {len(drain_paths)} counted contributions)...')
 
         ok = _hf_save_state(merged, compacted_ids, new_watermark,
-                            votes=votes,
+                            voters=voters,
                             drain_contribs=drain_paths)
         if ok:
             print('OK — knowledge.json updated on HF.')

@@ -20,7 +20,8 @@ Definitions:
     Per domain:
       crops          staging/<iid>/crops/<sha>.png            sha ∈ data/annotations.jsonl
       screens        staging/<iid>/screen_types/<T>/<sha>.png sha ∈ data/screen_types/metadata.jsonl
-      contributions  contributions/<date>/<id>.json           id  ∈ knowledge.json::processed_contributions
+      contributions  contributions/<date>/<id>.json           id  ∈ knowledge.json::processed_contributions,
+                                                               or <date> < knowledge.json::watermark_date
       anchors (opt)  staging/<iid>/anchors_grid_*.json        (build_type, aspect_bucket) ∈ data/anchors/*.json
 
 Output:
@@ -128,10 +129,11 @@ def main() -> int:
 
     print(f'== Knowledge repo: {HF_KNOW}')
     know_files    = _list_repo_files(api, HF_KNOW, 'dataset')
-    processed_ids = _load_knowledge_processed(api)
+    processed_ids, watermark, _ = _load_knowledge_processed(api)
     print(f'   {len(know_files)} paths listed, '
-          f'{len(processed_ids)} processed contribution IDs.')
-    contrib_drops = _plan_contributions_drain(know_files, processed_ids)
+          f'{len(processed_ids)} processed contribution IDs, '
+          f'watermark_date={watermark or "(none)"}.')
+    contrib_drops = _plan_contributions_drain(know_files, processed_ids, watermark)
     # Each contribution is .json + .png pair — count pairs, not files.
     contribs_orphans = sum(1 for p in contrib_drops if p.endswith('.json'))
 

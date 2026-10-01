@@ -52,9 +52,15 @@ def clone_hf_shallow(
     repo_id:   str,
     token:     str,
     repo_type: str = 'dataset',
+    full_history: bool = False,
 ) -> Path:
     """
     Shallow-clone (or fast-forward) a HF Hub repo to a stable cache dir.
+
+    `full_history=True` fetches every commit instead, into a cache dir of its
+    own, for tools that read files the repo has since deleted (the pHash vote
+    rebuild reads every contribution ever uploaded). Without LFS blobs the
+    warp-knowledge history is about 30 MB.
 
     Returns the working-tree Path.
     """
@@ -63,7 +69,9 @@ def clone_hf_shallow(
 
     cache_root = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache') / 'warp-hf-clone'
     cache_root.mkdir(parents=True, exist_ok=True)
-    cache_dir = cache_root / repo_id.replace('/', '__')
+    cache_dir = cache_root / (repo_id.replace('/', '__')
+                              + ('__full' if full_history else ''))
+    depth = [] if full_history else ['--depth', '1']
 
     # Pre-flight: hit the API endpoint via huggingface_hub. Since 1.2.0 the
     # SDK parses the IETF RateLimit-Reset header on a 429 and waits the
@@ -137,7 +145,7 @@ def clone_hf_shallow(
     if (cache_dir / '.git').exists():
         try:
             _git(['-c', f'http.extraHeader={auth_header}',
-                  'fetch', '--depth', '1', 'origin', 'HEAD'], cwd=cache_dir)
+                  'fetch', *depth, 'origin', 'HEAD'], cwd=cache_dir)
             _git(['reset', '--hard', 'FETCH_HEAD'], cwd=cache_dir)
             return cache_dir
         except subprocess.CalledProcessError:
@@ -148,7 +156,7 @@ def clone_hf_shallow(
         shutil.rmtree(cache_dir)
 
     _git_with_retry(['-c', f'http.extraHeader={auth_header}',
-                     'clone', '--depth', '1', '--single-branch',
+                     'clone', *depth, '--single-branch',
                      remote_url, str(cache_dir)],
                     label='clone')
 

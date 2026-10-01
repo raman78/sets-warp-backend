@@ -239,10 +239,11 @@ first contributor to confirm a new exotic console is almost always
 right. UPDATE is the bottleneck for safety; overwriting an established
 label is where a careless or hostile vote could do damage.
 
-`admin_merge.py` applies this over a tally it keeps, not over one run's
-votes: `knowledge.json` carries `votes`, phash → {name: votes}, and an
-UPDATE needs the challenger to lead the current name as well as reach
-`--min`. See `technical_overview.md`, "pHash: the tally is kept".
+`admin_merge.py` applies this over a record it keeps, not over one run's
+votes, and it counts **installs**, not files: `knowledge.json` carries
+`voters`, each install's latest vote per phash, and an UPDATE needs the
+challenger to lead the current name in installs as well as reach `--min`.
+See `technical_overview.md`, "pHash: one vote per install".
 
 ---
 

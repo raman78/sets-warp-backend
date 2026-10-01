@@ -86,6 +86,20 @@ default — pass `--apply` to commit.
 .venv/bin/python admin_merge.py --apply
 ```
 
+Each install has one vote per pHash, its latest; voting the same name again
+adds nothing. `--min` counts installs. The merger stops with an error if
+`knowledge.json` has no `voters` record. That record is built once, from
+every contribution ever uploaded, by:
+
+```sh
+.venv/bin/python admin_rebuild_votes.py                     # dry-run: lists every entry that would change
+.venv/bin/python admin_rebuild_votes.py --apply
+```
+
+> Warning: these scripts read `HF_TOKEN` from `.env`, so a local `--apply`
+> writes to production. So can anything that calls their `main()`; the
+> test suite blocks HF writes for that reason (`tests/conftest.py`).
+
 ### Train icon + screen classifiers
 
 ```sh
@@ -119,6 +133,8 @@ The nightly workflow does the same, and marks the run failed.
 `admin_audit_staging.py` runs on the 1st of each month at 04:00 UTC
 (`audit_staging_health.yml`) and counts staging files whose key is
 already in `data/` (i.e. files the next merger run will never look at).
+For pHash contributions that means files the merger has already
+processed — listed as processed, or older than its watermark date.
 Failure mails the repo owner.
 
 To run locally:

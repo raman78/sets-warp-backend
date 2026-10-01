@@ -112,6 +112,7 @@ production runs on.
 | `admin_audit_staging.py` | Read-only orphan check (monthly cron) |
 | `admin_drain_stale_staging.py` | Manual cleanup when audit breaches |
 | `admin_scrub_knowledge.py` | Remove bad pHash entries |
+| `admin_rebuild_votes.py` | One-shot: rebuild per-install pHash votes from history |
 | `admin_clean_labels.py` | Remove bad crop labels |
 
 ---
