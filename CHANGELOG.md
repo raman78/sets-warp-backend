@@ -40,6 +40,13 @@
   days.
 
 ### Fixed
+- **The virtual-poison audit runs again.** Since 2026-09-18 its workflow
+  installed sto-warp with `pip`, but every sto-warp release requires Python
+  3.14 and the runner has 3.11, so the 2026-10-01 run failed at install and
+  never audited. It now clones sto-warp beside the repo, as the tests
+  workflow does; checked on Python 3.11 with only the workflow's packages,
+  the audit answers with sto-warp's own guard, not the local fallback.
+
 - **Training no longer writes Git LFS hooks into the caller's repository.**
   Both trainers ran `git lfs install` before cloning the crops, which also
   installs four LFS hooks into whatever repository the command runs inside.

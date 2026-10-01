@@ -50,11 +50,15 @@ jobs:
           # label", including the rule that the game's yellow NEW ribbon is
           # chrome and not icon content. Without it the audit falls back to a
           # local copy that does not know the ribbon, and breaches on empty
-          # slots that are labelled correctly. --no-deps because only the
-          # pixel heuristics are needed: numpy and opencv are already here,
-          # and the client's real dependencies (PySide6, torch, easyocr) are
-          # not wanted on a CI runner. The run prints which one answered.
-          pip install --quiet --no-deps 'sto-warp'
+          # slots that are labelled correctly. It is cloned beside this repo,
+          # where admin_reject_crops finds it (`_STO_WARP_SIBLING`), the same
+          # way tests.yml does: every sto-warp release requires Python 3.14,
+          # so `pip install sto-warp` finds nothing on this runner and failed
+          # the 2026-10-01 run. Only the pixel heuristics are imported, which
+          # need numpy and opencv, so the client's own dependencies (PySide6,
+          # torch, easyocr) stay off the runner. The run prints which one
+          # answered.
+          git clone --quiet --depth 1 https://github.com/raman78/sto-warp.git ../sto-warp
 
       - name: Audit virtual-label poison in data/
         id: audit

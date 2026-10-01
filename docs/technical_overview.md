@@ -515,9 +515,12 @@ sto-warp's own guards — `icon_matcher._virtual_crop_looks_real` and
 refuses to seed and cannot drift from it. That includes the client's rule
 that the game's yellow *NEW* ribbon is chrome, not icon content: without it
 an empty slot carrying one is counted as poison, and the job breaches on
-correct data. The workflow therefore installs `sto-warp` with `--no-deps`
-(numpy and opencv are already present; PySide6, torch and easyocr are not
-wanted on a runner). A local bright/rich copy in `admin_reject_crops.py`
+correct data. The workflow therefore clones `sto-warp` beside this repo,
+where `admin_reject_crops._STO_WARP_SIBLING` finds it, as `tests.yml` does.
+It cannot `pip install` it: every sto-warp release requires Python 3.14, and
+the attempt failed the 2026-10-01 run before the audit started. Only the
+pixel heuristics are imported, which need numpy and opencv; PySide6, torch
+and easyocr stay off the runner. A local bright/rich copy in `admin_reject_crops.py`
 remains as the fallback, and both the scan and the audit print a
 `Heuristic:` line naming which one answered.
 
