@@ -86,10 +86,13 @@ default — pass `--apply` to commit.
 .venv/bin/python admin_merge.py --apply
 ```
 
-Each install has one vote per pHash, its latest; voting the same name again
-adds nothing. `--min` counts installs. The merger stops with an error if
-`knowledge.json` has no `voters` record. That record is built once, from
-every contribution ever uploaded, by:
+Each install has one vote per pHash and name: confirming the same icon
+again adds nothing, but two different names from one install both count,
+because two different icons can share a hash. An install takes a vote back
+by correcting it (the old name becomes `wrong_name`) or by marking the slot
+empty or inactive. `--min` counts installs. The merger stops with an error
+if `knowledge.json` has no `voters` record of the current shape. That
+record is built once, from every contribution ever uploaded, by:
 
 ```sh
 .venv/bin/python admin_rebuild_votes.py                     # dry-run: lists every entry that would change

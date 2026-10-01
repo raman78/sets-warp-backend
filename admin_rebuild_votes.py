@@ -2,15 +2,18 @@
 """
 admin_rebuild_votes.py — rebuild knowledge.json `voters` from history
 ======================================================================
-One-shot migration of knowledge.json to schema 4.
+One-shot migration of knowledge.json to schema 5.
 
 Schema 3 kept `votes`, phash → {name: count}, where the count was of
 contribution files. One install voting the same name for one hash 27
 times counted 27, and votes processed before the tally existed (2026-09-25)
 were not counted at all: 205 dissents and about 2,950 agreeing votes sat
-on disk with no effect. Schema 4 keeps `voters`, phash → {install_id:
-[name, timestamp]}, one vote per install, and admin_merge refuses to run
-until it exists.
+on disk with no effect. Schema 4 (live for a few hours on 2026-10-01) kept
+one name per install and hash, which dropped the second of two different
+icons sharing a hash. Schema 5 keeps `voters`, phash → install_id → name →
+[timestamp, active]: one vote per install and name, withdrawn only by the
+install itself (see admin_merge.merge). admin_merge refuses to run until
+it exists.
 
 What this does:
     1. Full-history clone of the knowledge repo (no LFS blobs).
@@ -22,12 +25,12 @@ What this does:
     4. Feed them all to admin_merge.merge() with empty voters and today's
        knowledge map as the incumbent — the same rule as every merge run.
     5. Report every entry that would change. --apply writes knowledge.json
-       (schema 4) in one commit. Nothing is deleted here; the backlog of
+       (schema 5) in one commit. Nothing is deleted here; the backlog of
        counted files is drained afterwards by drain_stale_staging.yml.
 
 Usage:
     .venv/bin/python admin_rebuild_votes.py            # dry-run report
-    .venv/bin/python admin_rebuild_votes.py --apply    # write schema 4
+    .venv/bin/python admin_rebuild_votes.py --apply    # write schema 5
     .venv/bin/python admin_rebuild_votes.py --min 3    # same flag as admin_merge
 
 Environment variables (.env, same as admin_merge.py):
@@ -115,19 +118,22 @@ def _scrubbed_pairs(repo: Path) -> dict[tuple[str, str], str]:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[1])
     ap.add_argument('--apply', action='store_true',
-                    help='Write knowledge.json (schema 4) to HF (default: dry-run)')
+                    help='Write knowledge.json (schema 5) to HF (default: dry-run)')
     ap.add_argument('--min', type=int, default=2, metavar='N',
                     help='Installs a challenger needs to change an entry (default: 2)')
     args = ap.parse_args()
 
     existing, processed, watermark, voters_now = admin_merge._hf_load_state()
     print(f'knowledge.json: {len(existing)} entries, '
-          f'{"schema 4 (voters present — rebuilding anyway)" if voters_now is not None else "no voters"}')
+          f'{"current voters present — rebuilding anyway" if voters_now is not None else "no current voters"}')
 
     print('Cloning full history of the knowledge repo...')
     repo = clone_hf_shallow(admin_merge.HF_REPO_ID, admin_merge.HF_TOKEN,
                             repo_type='dataset', full_history=True)
-    contribs = _all_contributions(repo)
+    # The same file can be added twice in history (restored after a
+    # deletion); it is one contribution.
+    contribs = list({c.get('contribution_id') or id(c): c
+                     for c in _all_contributions(repo)}.values())
     print(f'  {len(contribs)} contributions in history, '
           f'from {len({c.get("install_id") for c in contribs})} installs')
 
@@ -149,9 +155,10 @@ def main() -> None:
     actions = Counter(r['action'] for r in report)
     changed = [r for r in report if r['action'] in ('NEW', 'UPDATE')]
     no_voter = [ph for ph in merged if not voters.get(ph)]
-    pairs = sum(len(by) for by in voters.values())
+    pairs = sum(len(admin_merge._counted_names(by_name))
+                for by in voters.values() for by_name in by.values())
     print(f'\n--- Rebuild ---')
-    print(f'  {pairs} install votes on {len(voters)} hashes '
+    print(f'  {pairs} counted (install, name) votes on {len(voters)} hashes '
           f'(from {len(kept)} contribution files)')
     print(f'  Actions: {dict(actions)}')
     print(f'  Entries with no recorded voter (count one vote for their name): {len(no_voter)}')
@@ -165,7 +172,7 @@ def main() -> None:
         print('\nDRY-RUN — nothing written. Re-run with --apply.')
         return
 
-    print('\nWriting knowledge.json (schema 4)...')
+    print('\nWriting knowledge.json (schema 5)...')
     if not admin_merge._hf_save_state(merged, sorted(processed), watermark,
                                       voters=voters, drain_contribs=None):
         print('ERROR — save failed.', file=sys.stderr)

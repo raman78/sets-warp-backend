@@ -8,8 +8,9 @@ contributions disagreed with the table and had been forgotten.
 
 The tally that replaced it counted contribution files, so one install voting
 the same name 27 times for one hash counted 27. Since 2026-10-01 the record is
-`voters`, phash → {install_id: [name, timestamp]}: one vote per install, its
-latest.
+`voters`, phash → install_id → name → [timestamp, active]: one vote per
+install and name, withdrawn only by that install — a `wrong_name` naming it,
+or a later virtual-class vote.
 
 A hash also does not identify one picture: one carried votes for five
 different items. So the tally keeps every name it is given, and the
@@ -47,7 +48,7 @@ def _votes(voters, merged):
 def test_a_vote_that_falls_short_is_kept():
     merged, report, voters, _ = _run([_c('aa', 'Precision', 'i2')],
                                      {'aa': 'D.O.M.I.N.O.'},
-                                     voters={'aa': {'i1': ['D.O.M.I.N.O.', '']}})
+                                     voters={'aa': {'i1': {'D.O.M.I.N.O.': ['', 1]}}})
 
     assert report[0]['action'] == 'SKIP'
     assert _votes(voters, merged)['aa'] == {'D.O.M.I.N.O.': 1, 'Precision': 1}
@@ -68,7 +69,7 @@ def test_votes_from_separate_runs_add_up():
 def test_agreeing_votes_strengthen_the_entry():
     merged, report, voters, _ = _run(
         [_c('aa', 'D.O.M.I.N.O.', 'i2')], {'aa': 'D.O.M.I.N.O.'},
-        voters={'aa': {'i1': ['D.O.M.I.N.O.', '']}})
+        voters={'aa': {'i1': {'D.O.M.I.N.O.': ['', 1]}}})
 
     assert report[0]['action'] == 'unchanged'
     assert _votes(voters, merged)['aa'] == {'D.O.M.I.N.O.': 2}
@@ -87,24 +88,46 @@ def test_one_install_voting_again_counts_once():
     assert _votes(voters, merged)['aa'] == {'Precision': 1}
 
 
-def test_an_install_s_latest_vote_replaces_its_earlier_one():
+def test_two_names_from_one_install_both_count():
+    """A hash does not identify one picture: the same install names two
+    different icons that share it (measured: "Cannon Training" and "Shield
+    Frequency Analyst", same day). Neither replaces the other."""
     merged, _, voters, _ = _run(
-        [_c('aa', 'Chroniton Mine', 'i1', '2026-06-11T00:00:00Z'),
-         _c('aa', 'Isomagnetic Console', 'i1', '2026-09-05T00:00:00Z')], {})
+        [_c('aa', 'Cannon Training', 'i1', '2026-04-14T10:00:00Z'),
+         _c('aa', 'Shield Frequency Analyst', 'i1', '2026-04-14T10:05:00Z')], {})
 
-    assert voters['aa'] == {'i1': ['Isomagnetic Console', '2026-09-05T00:00:00Z']}
-    assert merged['aa'] == 'Isomagnetic Console'
+    assert _votes(voters, merged)['aa'] == {'Cannon Training': 1,
+                                            'Shield Frequency Analyst': 1}
 
 
-def test_an_older_vote_never_replaces_a_newer_one():
+def test_a_correction_withdraws_the_name_it_corrects():
+    c = _c('aa', 'Isomagnetic Console', 'i1', '2026-09-05T00:00:00Z')
+    c['wrong_name'] = 'Chroniton Mine'
+    merged, _, voters, _ = _run(
+        [_c('aa', 'Chroniton Mine', 'i1', '2026-06-11T00:00:00Z'), c], {})
+
+    assert _votes(voters, merged)['aa'] == {'Isomagnetic Console': 1}
+
+
+def test_an_older_event_never_replaces_a_newer_one():
     """Runs may process contributions out of order, or the same one twice;
-    neither may change the record."""
-    newer = {'aa': {'i1': ['Isomagnetic Console', '2026-09-05T00:00:00Z']}}
-    _, _, voters, _ = _run(
-        [_c('aa', 'Chroniton Mine', 'i1', '2026-06-11T00:00:00Z')],
-        {'aa': 'Isomagnetic Console'}, voters=newer)
+    neither may change the record. Here an old correction arrives after the
+    install voted the corrected name again."""
+    newer = {'aa': {'i1': {'Chroniton Mine': ['2026-09-05T00:00:00Z', 1]}}}
+    old = _c('aa', 'Isomagnetic Console', 'i1', '2026-06-11T00:00:00Z')
+    old['wrong_name'] = 'Chroniton Mine'
+    merged, _, voters, _ = _run([old], {'aa': 'Chroniton Mine'}, voters=newer)
 
-    assert voters['aa'] == newer['aa']
+    assert voters['aa']['i1']['Chroniton Mine'] == ['2026-09-05T00:00:00Z', 1]
+    assert 'Chroniton Mine' in _votes(voters, merged)['aa']
+
+
+def test_processing_a_contribution_twice_changes_nothing():
+    c = _c('aa', 'Precision', 'i1')
+    _, _, once, _ = _run([c], {})
+    _, _, twice, _ = _run([c], {}, voters=once)
+
+    assert once == twice
 
 
 def test_a_virtual_class_vote_withdraws_the_install_s_earlier_vote():
@@ -124,14 +147,14 @@ def test_a_virtual_class_vote_withdraws_the_install_s_earlier_vote():
 def test_a_tie_keeps_the_current_name():
     merged, report, _, _ = _run(
         [_c('aa', 'Precision', 'i2')], {'aa': 'D.O.M.I.N.O.'},
-        voters={'aa': {'i1': ['D.O.M.I.N.O.', '']}}, min_votes=1)
+        voters={'aa': {'i1': {'D.O.M.I.N.O.': ['', 1]}}}, min_votes=1)
 
     assert merged['aa'] == 'D.O.M.I.N.O.'
     assert report[0]['action'] == 'SKIP'   # a dissent that has not won yet
 
 
 def test_a_challenger_needs_more_installs_than_the_current_name():
-    current = {'aa': {f'k{i}': ['D.O.M.I.N.O.', ''] for i in range(4)}}
+    current = {'aa': {f'k{i}': {'D.O.M.I.N.O.': ['', 1]} for i in range(4)}}
     merged, _, _, _ = _run(
         [_c('aa', 'Precision', f'p{i}') for i in range(3)], {'aa': 'D.O.M.I.N.O.'},
         voters=current)
@@ -171,7 +194,7 @@ def test_every_name_a_hash_was_given_stays_in_the_tally():
     existing = {'cc': 'Revolutionary Combat Impulse Engine'}
     merged, _, voters, _ = _run(
         [_c('cc', n, f'i{k}') for k, n in enumerate(names)], existing,
-        voters={'cc': {'x': ['Revolutionary Combat Impulse Engine', '']}})
+        voters={'cc': {'x': {'Revolutionary Combat Impulse Engine': ['', 1]}}})
 
     assert set(_votes(voters, merged)['cc']) == set(names) | {'Revolutionary Combat Impulse Engine'}
 
@@ -179,7 +202,7 @@ def test_every_name_a_hash_was_given_stays_in_the_tally():
 def test_a_virtual_name_never_counts_for_a_name():
     merged, _, voters, _ = _run(
         [_c('aa', '__empty__', 'i2')], {'aa': 'D.O.M.I.N.O.'},
-        voters={'aa': {'i1': ['D.O.M.I.N.O.', ''], 'i3': ['__inactive__', '']}})
+        voters={'aa': {'i1': {'D.O.M.I.N.O.': ['', 1]}, 'i3': {'__inactive__': ['', 1]}}})
 
     assert set(_votes(voters, merged)['aa']) == {'D.O.M.I.N.O.'}
 
@@ -192,7 +215,7 @@ def test_a_skip_contribution_is_drained_too():
     contribs = [_c('aa', 'Precision', 'i2', cid='dissent'),
                 _c('bb', 'Precision', 'i2', cid='new')]
     _, report, _, by_phash = _run(contribs, {'aa': 'D.O.M.I.N.O.'},
-                                  voters={'aa': {'i1': ['D.O.M.I.N.O.', '']}})
+                                  voters={'aa': {'i1': {'D.O.M.I.N.O.': ['', 1]}}})
     paths = [Path('contributions/2026-10-01/dissent.json'),
              Path('contributions/2026-10-01/new.json'),
              Path('contributions/2026-10-01/pending.json')]
@@ -215,7 +238,8 @@ def test_a_contribution_without_install_is_not_counted(capsys):
 # ── Writing over a table without voters ────────────────────────────────────
 
 def test_the_merger_refuses_a_table_without_voters(monkeypatch, capsys):
-    """Schema 3 counted files: merging over it would keep counting repeats."""
+    """Schema 3 counted files and schema 4 kept one name per install and
+    hash: merging over either would carry that on."""
     def _unreachable(*a, **k):
         raise AssertionError('merged past the refusal')
 
@@ -236,7 +260,7 @@ def test_the_merger_refuses_a_table_without_voters(monkeypatch, capsys):
 
 # ── The scrub tool must not leave a removed name behind ────────────────────
 
-def test_a_scrubbed_name_leaves_the_tally_and_the_voters(monkeypatch):
+def test_a_scrubbed_name_is_withdrawn_from_the_tally_and_the_voters(monkeypatch):
     """Otherwise its old votes would restore it the next time anyone voted
     on that hash, or the next time voters were rebuilt."""
     import huggingface_hub
@@ -256,12 +280,32 @@ def test_a_scrubbed_name_leaves_the_tally_and_the_voters(monkeypatch):
     envelope = {'knowledge': {'aa': 'Charged Particle Burst', 'bb': 'Precision'},
                 'votes': {'aa': {'Charged Particle Burst': 2, 'Tachyon Beam': 1},
                           'bb': {'Precision': 1}},
-                'voters': {'aa': {'i1': ['Charged Particle Burst', ''],
-                                  'i2': ['Charged Particle Burst', ''],
-                                  'i3': ['Tachyon Beam', '']},
-                           'bb': {'i1': ['Precision', '']}}}
+                'voters': {'aa': {'i1': {'Charged Particle Burst': ['', 1]},
+                                  'i2': {'Charged Particle Burst': ['', 1]},
+                                  'i3': {'Tachyon Beam': ['', 1]}},
+                           'bb': {'i1': {'Precision': ['', 1]}}}}
 
     assert scrub._save_cleaned(envelope, {'bb': 'Precision'})
     assert sent['votes'] == {'aa': {'Tachyon Beam': 1}, 'bb': {'Precision': 1}}
-    assert sent['voters'] == {'aa': {'i3': ['Tachyon Beam', '']},
-                              'bb': {'i1': ['Precision', '']}}
+    import admin_merge as m
+    assert sent['voters']['aa']['i1']['Charged Particle Burst'][1] == 0
+    assert sent['voters']['aa']['i3'] == {'Tachyon Beam': ['', 1]}
+    assert m.votes_from_voters(sent['voters'], sent['knowledge']) == sent['votes']
+
+
+@pytest.mark.parametrize('schema, expect_voters', [(4, False), (5, True)])
+def test_the_loader_accepts_only_voters_of_the_current_schema(
+        monkeypatch, tmp_path, schema, expect_voters):
+    """Schema 4 also had a `voters` key, in another shape; reading it as
+    schema 5 would mistake its [name, ts] lists for name events."""
+    import json
+    import huggingface_hub
+
+    f = tmp_path / 'knowledge.json'
+    f.write_text(json.dumps({'schema_version': schema, 'knowledge': {},
+                             'voters': {'aa': {'i1': ['X', '']}}}))
+    monkeypatch.setattr(huggingface_hub, 'hf_hub_download', lambda *a, **k: str(f))
+
+    *_, voters = admin_merge._hf_load_state()
+
+    assert (voters is not None) is expect_voters

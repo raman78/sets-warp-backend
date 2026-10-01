@@ -3,16 +3,21 @@
 ## [Unreleased]
 
 ### Changed
-- **A pHash vote counts once per install.** `knowledge.json` (schema 4)
-  keeps `voters`, each install's latest vote per hash; `votes`, which
-  clients read, is now the number of installs per name, in the same shape.
-  The tally counted contribution files: one install had voted one name for
-  one hash 27 times, and 1,205 of 4,710 (install, hash) pairs carried
-  repeats. A vote for a virtual class withdraws the install's earlier vote.
-  `admin_merge.py` refuses to run over a file without `voters`; the new
-  one-shot `admin_rebuild_votes.py` builds it from every contribution in the
-  repo's history, leaving out votes a scrub removed. Its dry run changes 4
-  entries, each backed by two or more installs.
+- **A pHash vote counts once per install and name.** `knowledge.json`
+  (schema 5) keeps `voters`, every install's votes per hash with their
+  timestamps; `votes`, which clients read, is now the number of installs
+  per name, in the same shape. The tally counted contribution files: one
+  install had voted one name for one hash 27 times, and 1,205 of 4,710
+  (install, hash) pairs carried repeats. Different names from one install
+  on one hash all count, since they are usually different icons sharing it
+  (136 pairs); a vote is withdrawn only by a later `wrong_name` naming it
+  or a later virtual-class vote. Schema 4, deployed for a few hours the
+  same day, kept only each install's latest name per hash and is refused
+  like schema 3. `admin_merge.py` refuses to run over an older file; the
+  new one-shot `admin_rebuild_votes.py` builds `voters` from every
+  contribution in the repo's history, leaving out votes a scrub removed.
+  Against the morning's table it changes 7 entries, each backed by two or
+  more installs.
 - **`admin_merge.py` drains a SKIP's contribution file too.** Its vote is
   recorded, and nothing reads the file again; kept, SKIPs were 671 orphans
   in the 2026-10-01 staging audit.

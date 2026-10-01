@@ -67,7 +67,7 @@ chain together.
 | Staging audit | Read-only orphan check, monthly cron | `admin_audit_staging.py` |
 | One-shot drain | Manual cleanup when audit breaches | `admin_drain_stale_staging.py` |
 | Knowledge scrubber | Removes confirmed-bad pHash entries | `admin_scrub_knowledge.py` |
-| Vote rebuild | One-shot: builds `voters` (schema 4) from contribution history | `admin_rebuild_votes.py` |
+| Vote rebuild | One-shot: builds `voters` (schema 5) from contribution history | `admin_rebuild_votes.py` |
 | Label scrubber | Removes confirmed-bad crop labels | `admin_clean_labels.py` |
 | Virtual-crop review | Reject/relabel colourful `__empty__` crops + GUI | `admin_reject_crops.py`, `admin_console.py` |
 | Virtual-poison audit | Read-only unreviewed-poison count, monthly cron | `admin_audit_virtual_poison.py` |
@@ -211,16 +211,28 @@ threshold = min_votes if key in existing else 1
 accepted  = count >= threshold
 ```
 
-### pHash: one vote per install, kept, and a hash may carry several names
+### pHash: one vote per install and name, kept, and a hash may carry several names
 
-`admin_merge.py` keeps every install's vote in `knowledge.json` under
-`voters` (schema 4): phash → {install_id: [name, timestamp]}. An install has
-**one** vote per hash, its latest. Voting again replaces the earlier vote,
-and an older vote never replaces a newer one, so processing the same
-contribution twice, or two runs out of order, changes nothing. A vote for a
-virtual class (`__inactive__`, …) is recorded too: it counts for no name,
-but it withdraws what that install voted before. `votes`, phash → {name:
-installs}, is derived from `voters` on every save and is what clients read.
+`admin_merge.py` keeps every install's votes in `knowledge.json` under
+`voters` (schema 5): phash → install_id → name → [timestamp, active], the
+latest event for each name. An install has **one vote per (hash, name)**:
+confirming the same icon again adds nothing. Different names from one
+install on one hash all count, because they are usually different icons
+that share a hash. Of 4,553 (install, hash) pairs, 136 carry more than one
+name, for example "Cannon Training" and "Shield Frequency Analyst" from one
+install on the same day.
+
+A vote is withdrawn only by the install that cast it:
+
+- a later contribution that names it as `wrong_name` (an explicit
+  correction; 47 of those 136 pairs are corrections), or
+- a later vote for a virtual class (`__inactive__`, …), which withdraws
+  every name the install gave the hash before. It counts for no name.
+
+Every event keeps its timestamp, and an older one never replaces a newer
+one, so processing the same contribution twice, or two runs out of order,
+changes nothing. `votes`, phash → {name: installs}, is derived from
+`voters` on every save and is what clients read.
 
 How it got here. Before 2026-09-25 the merger tallied only the contributions
 that arrived since its last run, then marked them processed, so a dissent
@@ -228,11 +240,14 @@ that fell short was never seen again (205 of them that day). The tally that
 fixed it (schema 3) counted contribution *files*: one install had voted the
 same name for one hash 27 times, and 1,205 of 4,710 (install, hash) pairs
 carried repeats, up to 40. Recounting the old files that way would have
-flipped entries on one install's repetition alone. Schema 4 was built once
+flipped entries on one install's repetition alone. For a few hours on
+2026-10-01 schema 4 kept one name per install and hash, its latest, which
+silently dropped the second of two icons sharing a hash. Schema 5 was built
 by `admin_rebuild_votes.py` from every contribution in the repo's git
-history, leaving out the votes a scrub had removed; under one vote per
-install it changed 4 entries, each backed by two or more installs.
-`admin_merge.py` refuses to run over a file without `voters`.
+history, leaving out the votes a scrub had removed. Against the table as
+it stood that morning it changed 7 entries, each backed by two or more
+installs. `admin_merge.py` refuses to run over a file without schema-5
+`voters`.
 
 An entry changes when a challenger has **more** installs than the current
 name and at least `--min`. A tie keeps the current name. A phash with no
@@ -247,8 +262,9 @@ a beam bank and two others. So `knowledge` holds the leader for clients
 that read a single name, and `GET /knowledge` also returns `votes`. A
 client that reads it picks, among the names a hash was voted for, the one
 whose pictures the crop resembles (sto-warp `docs/ML_PIPELINE.md` §6).
-`admin_scrub_knowledge.py` removes a scrubbed name from `voters` and `votes`
-as well as from the map, or its old votes would restore it.
+`admin_scrub_knowledge.py` removes a scrubbed name from the map and from
+`votes`, and withdraws it in `voters` with an event stamped at the scrub, or
+its old votes would restore it. A later vote for it counts again.
 
 ### The embedder's gallery must be spread out
 
@@ -526,8 +542,8 @@ is reserved for the case where the audit flagged a breach, the cause
 has been understood and patched, and the leaked orphans need to be
 mopped up by hand. Scheduling it would silently paper over merger
 bugs; the manual gate is deliberate. It refuses to delete contributions
-while `knowledge.json` has no `voters`: before schema 4 a processed file
-could be the only record of its vote.
+while `knowledge.json` has no schema-5 `voters`: before that a processed
+file could be the only record of its vote.
 
 ### Virtual-poison audit (`admin_audit_virtual_poison.py`)
 

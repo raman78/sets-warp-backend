@@ -249,9 +249,14 @@ def _save_cleaned(envelope: dict, cleaned: dict[str, str]) -> bool:
     votes = {ph: names for ph, names in votes.items() if names}
     if votes or 'votes' in envelope:
         payload_obj['votes'] = votes
-    voters = {ph: {iid: v for iid, v in by.items() if v[0] != scrubbed.get(ph)}
+    # In `voters` the name is withdrawn, not erased: an event stamped now
+    # outranks every earlier vote for it, so reprocessing an old
+    # contribution cannot restore it, while a new vote still can.
+    now = datetime.now(UTC).strftime('%Y-%m-%dT%H:%M:%SZ')
+    voters = {ph: {iid: {n: (list(ev) if n != scrubbed.get(ph) else [now, 0])
+                         for n, ev in by_name.items()}
+                   for iid, by_name in by.items()}
               for ph, by in (envelope.get('voters') or {}).items()}
-    voters = {ph: by for ph, by in voters.items() if by}
     if voters or 'voters' in envelope:
         payload_obj['voters'] = voters
     payload_obj['updated_at'] = datetime.now(UTC).isoformat() + 'Z'

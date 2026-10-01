@@ -21,7 +21,7 @@ Drain rule (content-addressed, idempotent):
     contributions  — contributions/<date>/<id>.json       DROP if id in knowledge.json::processed_contributions,
                                                           or <date> is before its watermark_date
                      contributions/<date>/<id>.png        DROP companion crop
-                     Refused until knowledge.json carries `voters` (schema 4): before
+                     Refused until knowledge.json carries `voters` (schema 5): before
                      that a processed file may be the only record of its vote.
     anchors        — staging/<iid>/anchors_grid_*.json    OPT-IN (--include-anchors) — staging anchor
                      files aggregate multiple votes; only drain when explicitly requested
@@ -109,7 +109,8 @@ def _load_knowledge_processed(api) -> tuple[set[str], str, bool]:
     """Read what knowledge.json says admin_merge has processed.
 
     Returns (processed_contributions IDs, watermark_date, has_voters).
-    `has_voters` is whether the file records every install's vote (schema 4);
+    `has_voters` is whether the file records every install's vote (schema 5,
+    admin_merge.VOTERS_SCHEMA — not imported, it re-execs into a venv);
     only then is a processed contribution file redundant.
     """
     from huggingface_hub import hf_hub_download
@@ -125,7 +126,8 @@ def _load_knowledge_processed(api) -> tuple[set[str], str, bool]:
     ids  = data.get('processed_contributions', [])
     return (set(ids) if isinstance(ids, list) else set(),
             str(data.get('watermark_date') or ''),
-            isinstance(data.get('voters'), dict))
+            isinstance(data.get('voters'), dict)
+            and int(data.get('schema_version') or 0) >= 5)
 
 
 def _load_anchor_keys(api, repo_files: list[str]) -> set[tuple[str, str]]:
@@ -370,7 +372,7 @@ def main() -> int:
     contrib_drops  = _plan_contributions_drain(know_files, processed_ids, watermark)
     if contrib_drops and not has_voters:
         print(f'   contributions: REFUSED — {sum(1 for p in contrib_drops if p.endswith(".json"))} '
-              f'processed files, but knowledge.json has no `voters` (schema < 4), so '
+              f'processed files, but knowledge.json has no `voters` of schema 5, so '
               f'some of them are the only record of their vote. Run '
               f'admin_rebuild_votes.py --apply first.')
         contrib_drops = []

@@ -103,6 +103,14 @@ HF_TOKEN   = os.environ.get('HF_TOKEN', '')
 HF_REPO_ID = os.environ.get('HF_REPO_ID', 'sets-sto/warp-knowledge')
 
 
+# phash → install_id → name → [timestamp, active]: the latest event this
+# install recorded for this name on this hash — a vote (1) or a withdrawal (0).
+Voters = dict[str, dict[str, dict[str, list]]]
+
+# knowledge.json schema that carries `voters` in the shape above.
+VOTERS_SCHEMA = 5
+
+
 # ── HF helpers ─────────────────────────────────────────────────────────────────
 
 def _hf_list_contributions(
@@ -169,16 +177,17 @@ def _hf_list_contributions(
     return contribs, new_ids, all_paths
 
 
-def _hf_load_state() -> tuple[dict[str, str], set[str], str, dict[str, dict[str, list[str]]] | None]:
+def _hf_load_state() -> tuple[dict[str, str], set[str], str, Voters | None]:
     """
     Loads the current knowledge.json from HF.
 
     Returns (knowledge, processed_contribution_ids, watermark_date, voters).
-    `voters` is None when the file is from before schema 4: it then carries
+    `voters` is None when the file is from before schema 5. Schema 3 carried
     only bare vote counts, which cannot tell one install voting ten times
-    from ten installs. `main` refuses to merge over such a file — writing
-    it back would lose nothing visible and count every repeat vote again.
-    A missing knowledge.json starts from scratch with empty voters.
+    from ten installs; schema 4 kept one name per install and hash, which
+    loses the second of two different pictures sharing a hash. `main`
+    refuses to merge over either. A missing knowledge.json starts from
+    scratch with empty voters.
     """
     try:
         from huggingface_hub import hf_hub_download
@@ -199,7 +208,7 @@ def _hf_load_state() -> tuple[dict[str, str], set[str], str, dict[str, dict[str,
         processed = set(data.get('processed_contributions', [])) if isinstance(data, dict) else set()
         watermark = data.get('watermark_date', '') if isinstance(data, dict) else ''
         voters = data.get('voters') if isinstance(data, dict) else None
-        if not isinstance(voters, dict):
+        if not isinstance(voters, dict) or int(data.get('schema_version') or 0) < VOTERS_SCHEMA:
             voters = None
         return knowledge, processed, watermark, voters
     except Exception as e:
@@ -252,14 +261,13 @@ def _hf_save_state(
     knowledge:        dict[str, str],
     processed_ids:    list[str],
     watermark_date:   str,
-    voters:           dict[str, dict[str, list[str]]],
+    voters:           Voters,
     drain_contribs:   list[Path] | None              = None,
 ) -> bool:
     """Save knowledge.json + (optionally) drain counted contributions in a
     single atomic HF commit.
 
-    `voters` is the record every decision is made from: phash →
-    {install_id: [name, timestamp]}, each install's latest vote. `votes`,
+    `voters` is the record every decision is made from (see `merge`). `votes`,
     phash → {name: installs}, is derived from it on every save and kept for
     clients, which read it as `GET /knowledge` returns it. The runtime
     `knowledge` map stays a plain `phash → name` (the tally's winner) to
@@ -277,7 +285,7 @@ def _hf_save_state(
         import io as _io
         api = HfApi(token=HF_TOKEN)
         payload_obj = {
-            'schema_version':           4,
+            'schema_version':           VOTERS_SCHEMA,
             'knowledge':                knowledge,
             'updated_at':               datetime.now(UTC).isoformat() + 'Z',
             'entries':                  len(knowledge),
@@ -332,30 +340,48 @@ def _is_poison_name(name: str) -> bool:
     return name.startswith('__') or name == 'Test Item Name'
 
 
-def _tally(
-    voters:   dict[str, dict[str, list[str]]],
-    existing: dict[str, str],
-) -> dict[str, Counter]:
-    """phash → Counter(name → installs whose latest vote it is).
+def _counted_names(by_name: dict[str, list]) -> set[str]:
+    """The real names one install currently votes for on one hash.
 
-    `voters` also records virtual-class votes (a withdrawal); they count for
-    no name. An entry no install currently votes a real name for — nobody
-    recorded, or every voter withdrawn — counts one vote for its current
-    name, so it stays until a challenger reaches `--min`. None existed after
-    the 2026-10-01 rebuild.
+    A name counts when its latest event is a vote, and that vote is not
+    older than the install's latest virtual-class vote on the hash: saying
+    "this slot is `__inactive__`" withdraws what the install named before.
     """
-    tally: dict[str, Counter] = {
-        ph: Counter(v[0] for v in by.values() if not _is_poison_name(v[0]))
-        for ph, by in voters.items()
-    }
+    virtual_at = max((ev[0] for n, ev in by_name.items()
+                      if _is_poison_name(n) and ev[1]), default=None)
+    return {n for n, (at, active) in by_name.items()
+            if active and not _is_poison_name(n)
+            and (virtual_at is None or at >= virtual_at)}
+
+
+def _tally(voters: Voters, existing: dict[str, str]) -> dict[str, Counter]:
+    """phash → Counter(name → installs that currently vote for it).
+
+    An entry no install currently votes a real name for — nobody recorded,
+    or every voter withdrawn — counts one vote for its current name, so it
+    stays until a challenger reaches `--min`.
+    """
+    tally: dict[str, Counter] = {}
+    for ph, by_install in voters.items():
+        names: Counter = Counter()
+        for by_name in by_install.values():
+            names.update(_counted_names(by_name))
+        tally[ph] = names
     for ph, name in existing.items():
         if not _is_poison_name(name) and not tally.get(ph):
             tally[ph] = Counter({name: 1})
     return tally
 
 
+def _record(by_name: dict[str, list], name: str, at: str, active: int) -> None:
+    """Keep the latest event per name; an older event never replaces a newer one."""
+    prev = by_name.get(name)
+    if prev is None or at >= prev[0]:
+        by_name[name] = [at, active]
+
+
 def votes_from_voters(
-    voters:   dict[str, dict[str, list[str]]],
+    voters:   Voters,
     existing: dict[str, str],
 ) -> dict[str, dict[str, int]]:
     """The `votes` map clients read: phash → {name: installs}, leader first."""
@@ -368,19 +394,27 @@ def merge(
     existing:   dict[str, str],
     min_votes:  int = 2,
     verbose:    bool = False,
-    voters:     dict[str, dict[str, list[str]]] | None = None,
-) -> tuple[dict[str, str], list[dict], dict[str, dict[str, list[str]]], dict[str, set[str]]]:
+    voters:     Voters | None = None,
+) -> tuple[dict[str, str], list[dict], Voters, dict[str, set[str]]]:
     """
     Majority vote of installs, over a record that is never forgotten.
 
-    `voters` is carried in knowledge.json: phash → {install_id: [name,
-    timestamp]}, each install's latest vote. An install has one vote per
-    phash. Voting again replaces its earlier vote, and an older vote never
-    replaces a newer one, so processing the same contribution twice, or two
-    runs out of order, changes nothing. Until 2026-10-01 the tally counted
-    contribution files: one install had voted the same name for one hash 27
-    times, and recounting the old files would have flipped entries on such
-    repeats alone.
+    `voters` is carried in knowledge.json: phash → install_id → name →
+    [timestamp, active], the latest event per name. An install has one vote
+    per (hash, name): voting the same name again adds nothing. Until
+    2026-10-01 the tally counted contribution files, and one install had
+    voted the same name for one hash 27 times.
+
+    Different names from one install on one hash all count, because a hash
+    does not identify one picture: of 4,553 (install, hash) pairs, 136 carry
+    more than one real name, and most are two different icons sharing a
+    hash ("Cannon Training" and "Shield Frequency Analyst", same day). A
+    vote is withdrawn only when the install says so: a later contribution
+    naming it as `wrong_name` (47 of the 136 are such corrections), or a
+    later virtual-class vote, which withdraws every earlier name. Each event
+    keeps its timestamp and an older one never replaces a newer one, so
+    processing a contribution twice, or two runs out of order, changes
+    nothing.
 
     The record outlives the runs: until 2026-09-25 each run tallied only its
     own new contributions and then marked them processed, so a dissenting
@@ -398,15 +432,16 @@ def merge(
     Returns (merged_knowledge, report_rows, voters, contribs_by_phash):
       - merged_knowledge[phash]   → leading name (string — runtime API contract).
       - report_rows               → display dicts (for printing + summary stats).
-      - voters[phash]             → the updated record, {install_id: [name, ts]}.
+      - voters[phash]             → the updated record (see above).
       - contribs_by_phash[phash]  → set of contribution_id whose vote is now
         in `voters`. The drain (D-G.9) deletes exactly these files: once the
         vote is recorded, nothing reads the file again.
     """
-    voters = {ph: {iid: list(v) for iid, v in by.items()}
+    voters = {ph: {iid: {n: list(ev) for n, ev in by_name.items()}
+                   for iid, by_name in by.items()}
               for ph, by in (voters or {}).items()}
 
-    # Add this run's votes, oldest first, so an install's latest vote wins
+    # Add this run's votes
     phash_meta:  dict[str, dict]    = {}   # phash → {total, confirmed, wrong_names}
     contribs_by_phash: dict[str, set[str]] = {}
     no_install: list[str] = []
@@ -424,10 +459,12 @@ def merge(
             no_install.append((c.get('contribution_id') or '?').strip())
             continue
 
-        at   = str(c.get('timestamp') or '')
-        prev = voters.setdefault(ph, {}).get(iid)
-        if prev is None or at >= prev[1]:
-            voters[ph][iid] = [name, at]
+        at      = str(c.get('timestamp') or '')
+        by_name = voters.setdefault(ph, {}).setdefault(iid, {})
+        _record(by_name, name, at, 1)
+        wrong = (c.get('wrong_name') or '').strip()
+        if wrong and wrong != name:
+            _record(by_name, wrong, at, 0)
         cid = (c.get('contribution_id') or '').strip()
         if cid:
             contribs_by_phash.setdefault(ph, set()).add(cid)
@@ -435,17 +472,16 @@ def merge(
                                           'wrong': Counter(), 'names': Counter()})
         meta['total'] += 1
         if _is_poison_name(name):
-            # A virtual class never counts for a name (`_tally` leaves it
-            # out), but it is still the install's latest word on this hash
-            # and withdraws whatever it voted before. Measured 2026-10-01:
-            # an install voted "Charged Particle Burst" once and
-            # `__inactive__` after it; dropping the virtual vote here kept
-            # the withdrawn one alive and made it a NEW entry.
+            # A virtual class never counts for a name, but it is recorded:
+            # it withdraws the names this install gave the hash before
+            # (`_counted_names`). Measured 2026-10-01: an install voted
+            # "Charged Particle Burst" once and `__inactive__` after it;
+            # dropping the virtual vote kept the withdrawn name alive and
+            # made it a NEW entry.
             continue
         meta['names'][name] += 1
         if c.get('confirmed'):
             meta['confirmed'] += 1
-        wrong = c.get('wrong_name', '').strip()
         if wrong:
             meta['wrong'][wrong] += 1
 
@@ -605,11 +641,11 @@ Environment variables (.env):
           f'{len(processed_ids)} tracked contribution IDs, '
           f'watermark_date={watermark or "(none)"}\n')
     if voters is None:
-        print('ERROR: knowledge.json has no `voters` (schema < 4). Its vote '
-              'counts cannot tell repeat votes from separate installs, and '
-              'merging over them would keep counting every repeat. Run '
-              '`admin_rebuild_votes.py --apply` once to rebuild voters from '
-              'the contribution history.', file=sys.stderr)
+        print(f'ERROR: knowledge.json has no `voters` of schema {VOTERS_SCHEMA}. '
+              'An older file counts repeat votes (schema 3) or keeps one name '
+              'per install and hash (schema 4), and merging over it would '
+              'carry that on. Run `admin_rebuild_votes.py --apply` once to '
+              'rebuild voters from the contribution history.', file=sys.stderr)
         sys.exit(1)
 
     # 2. List contributions, filtered to NEW ones only.

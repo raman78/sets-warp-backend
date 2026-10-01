@@ -241,9 +241,10 @@ label is where a careless or hostile vote could do damage.
 
 `admin_merge.py` applies this over a record it keeps, not over one run's
 votes, and it counts **installs**, not files: `knowledge.json` carries
-`voters`, each install's latest vote per phash, and an UPDATE needs the
-challenger to lead the current name in installs as well as reach `--min`.
-See `technical_overview.md`, "pHash: one vote per install".
+`voters`, one vote per install and name on each phash, and an UPDATE needs
+the challenger to lead the current name in installs as well as reach
+`--min`. See `technical_overview.md`, "pHash: one vote per install and
+name".
 
 ---
 
