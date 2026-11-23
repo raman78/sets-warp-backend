@@ -289,6 +289,8 @@ must be patched, not papered over.
 | Train icon + screen classifier | every 6 h, `0 */6 * * *` | `train_central_model.yml` |
 | Train ArcFace embedder | daily, `45 0 * * *` | `train_metric_model.yml` |
 | Audit staging health | monthly, `0 4 1 * *` | `audit_staging_health.yml` |
+| Audit virtual poison | monthly, `0 5 1 * *` | `audit_virtual_poison.yml` |
+| Audit pipeline movement | daily, `0 7 * * *` | `audit_pipeline_movement.yml` |
 | Drain stale staging | manual only | `drain_stale_staging.yml` |
 
 The two-hour merge cadence is deliberately offset (`:22`) from the
@@ -299,6 +301,12 @@ over an hour (a merge takes 1-2 min).
 The classifier runs every 6 h rather than hourly because a real run takes
 up to ~5 h, and two at once would race to publish; see
 `technical_overview.md` §4, "How the time is shared out".
+
+---
+
+Every cron above stops if the repository sees no push for 60 days: GitHub
+disables scheduled workflows in an inactive public repository. See
+`technical_overview.md` §5, "GitHub's 60-day rule for scheduled workflows".
 
 ---
 

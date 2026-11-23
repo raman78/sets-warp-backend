@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Documentation
+- **The daily Pipeline Movement Audit and GitHub's 60-day rule are
+  documented.** The audit had no entry in any doc. GitHub turns off every
+  scheduled workflow in a public repository after 60 days without a push,
+  and the first warning came 53 days after the last one. The docs now say
+  how to reset the clock and how to re-enable a disabled workflow.
+
 ### Changed
 - **A pHash vote counts once per install and name.** `knowledge.json`
   (schema 5) keeps `voters`, every install's votes per hash with their

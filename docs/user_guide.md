@@ -168,6 +168,27 @@ human-readable summary and machine-readable `AUDIT:` lines for grepping.
 > cron. Do not add a schedule. A scheduled drain would silently mask
 > recurring merger bugs.
 
+### Is the pipeline moving?
+
+`admin_audit_pipeline_movement.py` runs every morning
+(`audit_pipeline_movement.yml`, 07:00 UTC). If crops have waited in staging
+for more than two days and nothing has reached `data/`, the run fails and
+mails the repo owner. It does not say why; start from the latest Merge
+Staging run log.
+
+```sh
+.venv/bin/python admin_audit_pipeline_movement.py
+.venv/bin/python admin_audit_pipeline_movement.py --max-age-days 3
+```
+
+### When GitHub says a workflow "will be disabled soon"
+
+GitHub switches off scheduled workflows in a public repository after 60 days
+with no push. Nothing in the pipeline counts as a push, so a quiet stretch
+without code changes stops merging, training and the audits all at once.
+Before the deadline, any push to `main` resets the clock. After it, turn each
+workflow back on with `gh workflow enable <file>`, or from the Actions tab.
+
 ### Removing bad knowledge or labels
 
 | Symptom | Tool |

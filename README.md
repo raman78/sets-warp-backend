@@ -125,6 +125,8 @@ production runs on.
 | `train_central_model.yml` | every 6 h, `0 */6 * * *` | `admin_train.py` |
 | `train_metric_model.yml` | daily, `45 0 * * *` | `admin_train_metric.py` |
 | `audit_staging_health.yml` | monthly, `0 4 1 * *` | `admin_audit_staging.py` |
+| `audit_virtual_poison.yml` | monthly, `0 5 1 * *` | `admin_audit_virtual_poison.py` |
+| `audit_pipeline_movement.yml` | daily, `0 7 * * *` | `admin_audit_pipeline_movement.py` |
 | `drain_stale_staging.yml` | manual only | `admin_drain_stale_staging.py` |
 
 ---

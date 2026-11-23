@@ -71,6 +71,7 @@ chain together.
 | Label scrubber | Removes confirmed-bad crop labels | `admin_clean_labels.py` |
 | Virtual-crop review | Reject/relabel colourful `__empty__` crops + GUI | `admin_reject_crops.py`, `admin_console.py` |
 | Virtual-poison audit | Read-only unreviewed-poison count, monthly cron | `admin_audit_virtual_poison.py` |
+| Movement audit | Read-only check that `data/` still moves while staging holds work, daily cron | `admin_audit_pipeline_movement.py` |
 
 ---
 
@@ -571,6 +572,36 @@ pixel heuristics are imported, which need numpy and opencv; PySide6, torch
 and easyocr stay off the runner. A local bright/rich copy in `admin_reject_crops.py`
 remains as the fallback, and both the scan and the audit print a
 `Heuristic:` line naming which one answered.
+
+### Daily movement audit (`admin_audit_pipeline_movement.py`)
+
+`audit_pipeline_movement.yml` (daily cron, 07:00 UTC) asks one question:
+*uploads are waiting in staging — has `data/` moved?* The two audits above
+check a state, and a stalled pipeline looks healthy to both until the pile
+is large; this one checks movement, and is deliberately blind to the cause.
+It exists because the crop merge failed on every run from 2026-07-16 and
+reported success for seven weeks.
+
+The heartbeat is the last promotion commit, the only thing that rewrites
+`data/annotations.jsonl`. The clock is the oldest client upload
+(`WARP bulk:` commit) newer than that promotion, i.e. the oldest work the
+merge has not yet covered. Timing the work rather than the promotion keeps
+a quiet week without uploads from reading as a stall. Breach (default:
+waiting work older than 2 days, input `max_age_days`) exits 1 and mails the
+owner. Staging files no run can settle, such as an install with crops but no
+annotations file, are reported as `RESIDUE:` lines and also breach.
+
+### GitHub's 60-day rule for scheduled workflows
+
+This repository is public, and GitHub disables every `schedule` trigger in a
+public repository after 60 days without repository activity. Scheduled runs
+do not count, and neither do the pipeline's writes to Hugging Face, so a
+pipeline that runs fine with no code changes is switched off: the mergers,
+both trainers and all three audits, including the movement audit that would
+otherwise notice. GitHub mails a warning per workflow about a week ahead.
+Until the schedule moves elsewhere, any push to `main` resets the clock, and
+a workflow already disabled comes back with `gh workflow enable <file>`.
+The first warning came on 2026-11-23, 53 days after the last push.
 
 ---
 
