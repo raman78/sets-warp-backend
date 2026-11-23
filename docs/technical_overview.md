@@ -599,9 +599,24 @@ do not count, and neither do the pipeline's writes to Hugging Face, so a
 pipeline that runs fine with no code changes is switched off: the mergers,
 both trainers and all three audits, including the movement audit that would
 otherwise notice. GitHub mails a warning per workflow about a week ahead.
-Until the schedule moves elsewhere, any push to `main` resets the clock, and
-a workflow already disabled comes back with `gh workflow enable <file>`.
-The first warning came on 2026-11-23, 53 days after the last push.
+Any push to `main` resets the clock, and a workflow already disabled comes
+back with `gh workflow enable <file>`. The first warning came on 2026-11-23,
+53 days after the last push.
+
+The reset is deliberately manual. Automating it, with bot commits or a job
+that re-enables the workflows through the API, is against GitHub's terms:
+GitHub disabled the widely used `keepalive-workflow` action for exactly
+that. Making the repository private would lift the rule, but the workflows
+used about 1,980 runner minutes in the 30 days to 2026-11-23, at the edge of
+the 2,000 free minutes a private repository gets.
+
+What is automated is the warning. The movement audit's second step,
+"Warn before GitHub disables the schedules", reads the date of the last
+commit on `main` and, from day 45 (input `warn_after_days`), fails the run
+with an error saying how many days are left. That means an email two weeks
+ahead, from our own job, in addition to GitHub's one-week warning. The step
+runs whether or not the movement check breached, and its line, with the
+day count, is in every run's summary.
 
 ---
 

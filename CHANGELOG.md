@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+- **Two weeks' warning before GitHub disables the schedules.** The daily
+  Pipeline Movement Audit fails from day 45 without a push to `main`, saying
+  how many days are left before GitHub turns off every scheduled workflow at
+  day 60. The reset stays manual: automating it is against GitHub's terms.
+
 ### Documentation
 - **The daily Pipeline Movement Audit and GitHub's 60-day rule are
   documented.** The audit had no entry in any doc. GitHub turns off every

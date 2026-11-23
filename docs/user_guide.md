@@ -186,6 +186,9 @@ Staging run log.
 GitHub switches off scheduled workflows in a public repository after 60 days
 with no push. Nothing in the pipeline counts as a push, so a quiet stretch
 without code changes stops merging, training and the audits all at once.
+The daily movement audit warns first: from day 45 its run fails with
+"Schedules expire in N days", and GitHub mails you about the failed run.
+Do not automate the reset; GitHub treats that as a terms violation.
 Before the deadline, any push to `main` resets the clock. After it, turn each
 workflow back on with `gh workflow enable <file>`, or from the Actions tab.
 

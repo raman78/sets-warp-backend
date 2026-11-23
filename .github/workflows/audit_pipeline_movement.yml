@@ -21,6 +21,9 @@
 # Runs after the mergers have had their overnight windows (the merge is
 # scheduled every two hours), so a breach means several attempts failed, not
 # that one was unlucky.
+#
+# A second, independent step warns from day 45 without a push to main that
+# GitHub will disable every scheduled workflow at day 60 (see the step).
 
 name: Pipeline Movement Audit
 
@@ -33,6 +36,11 @@ on:
         description: 'Days data/ may stand still while staging holds work (default: 2)'
         required: false
         default: '2'
+        type: string
+      warn_after_days:
+        description: 'Days without a push to main before the schedule warning fails the run (default: 45)'
+        required: false
+        default: '45'
         type: string
 
 jobs:
@@ -62,6 +70,34 @@ jobs:
           set -o pipefail   # a crashed step must not be green
           MAX_AGE="${{ github.event.inputs.max_age_days || '2' }}"
           python admin_audit_pipeline_movement.py --max-age-days "$MAX_AGE" | tee /tmp/audit_movement.log
+
+      # GitHub disables every `schedule` trigger in a public repository after
+      # 60 days without a push, and neither scheduled runs nor the pipeline's
+      # writes to Hugging Face count. That would stop the mergers, the
+      # trainers and this audit at once, silently. Automating the reset
+      # (bot commits, re-enabling via the API) is against GitHub's terms, so
+      # this step only warns early and loudly; a human pushes a real commit,
+      # or runs `gh workflow enable` once a workflow is already off.
+      # Runs even when the movement audit breached: the two are independent.
+      - name: Warn before GitHub disables the schedules
+        if: ${{ !cancelled() }}
+        run: |
+          WARN_AFTER="${{ github.event.inputs.warn_after_days || '45' }}"
+          LAST_PUSH=$(git log -1 --format=%ct HEAD)
+          DAYS=$(( ( $(date +%s) - LAST_PUSH ) / 86400 ))
+          LEFT=$(( 60 - DAYS ))
+          LINE="Last commit on main: $(git log -1 --format='%h %cI' HEAD), ${DAYS} days ago; GitHub disables the scheduled workflows at 60 days."
+          echo "$LINE"
+          {
+            echo '## Schedule inactivity'
+            echo "$LINE"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$DAYS" -ge "$WARN_AFTER" ]; then
+            MSG="In about ${LEFT} days GitHub will disable every scheduled workflow (merge, training, audits). Push a real commit to main, or run 'gh workflow enable <file>' for any already disabled."
+            echo "::error title=Schedules expire in ${LEFT} days::${MSG}"
+            echo "**WARNING:** ${MSG}" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
 
       - name: Publish summary
         if: ${{ always() }}
