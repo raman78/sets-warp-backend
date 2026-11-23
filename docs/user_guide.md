@@ -191,16 +191,20 @@ The daily movement audit warns first: from day 45 its run fails with
 The run's summary, at the top of the page the email links to, carries the
 procedure with commands ready to paste:
 
-1. List the workflows (`gh workflow list --all`) and re-enable any that
-   shows `disabled_inactivity` (`gh workflow enable <file>`; the summary has
+Every command names the repository with `-R`, so it works from any
+directory; without it `gh` looks for a git repository in the current one
+and fails with "not a git repository".
+
+1. List the workflows (`gh workflow list --all -R raman78/sets-warp-backend`) and re-enable any that
+   shows `disabled_inactivity` (`gh workflow enable <file> -R raman78/sets-warp-backend`; the summary has
    a one-liner that enables all of them).
 2. Push a real commit to `main`. Any genuine change will do.
-3. Start the audit by hand (`gh workflow run audit_pipeline_movement.yml`)
+3. Start the audit by hand (`gh workflow run audit_pipeline_movement.yml -R raman78/sets-warp-backend`)
    and check that it is green and says "0 days ago".
 
 Do not automate the reset; GitHub treats that as a terms violation.
 Before the deadline, any push to `main` resets the clock. After it, turn each
-workflow back on with `gh workflow enable <file>`, or from the Actions tab.
+workflow back on with `gh workflow enable <file> -R raman78/sets-warp-backend`, or from the Actions tab.
 
 ### Removing bad knowledge or labels
 

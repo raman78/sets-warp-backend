@@ -600,7 +600,7 @@ pipeline that runs fine with no code changes is switched off: the mergers,
 both trainers and all three audits, including the movement audit that would
 otherwise notice. GitHub mails a warning per workflow about a week ahead.
 Any push to `main` resets the clock, and a workflow already disabled comes
-back with `gh workflow enable <file>`. The first warning came on 2026-11-23,
+back with `gh workflow enable <file> -R raman78/sets-warp-backend`. The first warning came on 2026-11-23,
 53 days after the last push.
 
 The reset is deliberately manual. Automating it, with bot commits or a job
