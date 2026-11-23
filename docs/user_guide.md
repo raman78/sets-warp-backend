@@ -188,6 +188,16 @@ with no push. Nothing in the pipeline counts as a push, so a quiet stretch
 without code changes stops merging, training and the audits all at once.
 The daily movement audit warns first: from day 45 its run fails with
 "Schedules expire in N days", and GitHub mails you about the failed run.
+The run's summary, at the top of the page the email links to, carries the
+procedure with commands ready to paste:
+
+1. List the workflows (`gh workflow list --all`) and re-enable any that
+   shows `disabled_inactivity` (`gh workflow enable <file>`; the summary has
+   a one-liner that enables all of them).
+2. Push a real commit to `main`. Any genuine change will do.
+3. Start the audit by hand (`gh workflow run audit_pipeline_movement.yml`)
+   and check that it is green and says "0 days ago".
+
 Do not automate the reset; GitHub treats that as a terms violation.
 Before the deadline, any push to `main` resets the clock. After it, turn each
 workflow back on with `gh workflow enable <file>`, or from the Actions tab.

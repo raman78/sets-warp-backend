@@ -613,7 +613,10 @@ the 2,000 free minutes a private repository gets.
 What is automated is the warning. The movement audit's second step,
 "Warn before GitHub disables the schedules", reads the date of the last
 commit on `main` and, from day 45 (input `warn_after_days`), fails the run
-with an error saying how many days are left. That means an email two weeks
+with an error saying how many days are left. The error annotation gives the
+three-step fix in one line; the run summary gives it in full, with commands
+ready to paste (re-enable workflows in `disabled_inactivity`, push a real
+commit, re-run the audit). That means an email two weeks
 ahead, from our own job, in addition to GitHub's one-week warning. The step
 runs whether or not the movement check breached, and its line, with the
 day count, is in every run's summary.

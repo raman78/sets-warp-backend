@@ -93,9 +93,47 @@ jobs:
             echo "$LINE"
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$DAYS" -ge "$WARN_AFTER" ]; then
-            MSG="In about ${LEFT} days GitHub will disable every scheduled workflow (merge, training, audits). Push a real commit to main, or run 'gh workflow enable <file>' for any already disabled."
+            MSG="In about ${LEFT} days GitHub will disable every scheduled workflow (merge, training, audits). To fix: 1) re-enable any already disabled: gh workflow list --all -R ${GITHUB_REPOSITORY}, then gh workflow enable <file> -R ${GITHUB_REPOSITORY}; 2) push a real commit to main; 3) confirm: gh workflow run audit_pipeline_movement.yml -R ${GITHUB_REPOSITORY} must be green. Full steps in the run summary."
             echo "::error title=Schedules expire in ${LEFT} days::${MSG}"
-            echo "**WARNING:** ${MSG}" >> "$GITHUB_STEP_SUMMARY"
+            # The run summary is the first thing on the run page the failure
+            # email links to, so the full procedure lives there.
+            cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+
+          ### WARNING: GitHub disables the scheduled workflows in about ${LEFT} days
+
+          Merge, both trainers and all audits stop together, this one included.
+          Run these from any terminal with \`gh\` logged in.
+
+          **1. Re-enable anything GitHub has already switched off.**
+          List the workflows; one switched off shows \`disabled_inactivity\`:
+
+          \`\`\`sh
+          gh workflow list --all -R ${GITHUB_REPOSITORY}
+          \`\`\`
+
+          Enable every one of them in one go (prints nothing when none is off):
+
+          \`\`\`sh
+          gh workflow list --all --json path,state -R ${GITHUB_REPOSITORY} \\
+            --jq '.[] | select(.state=="disabled_inactivity") | .path' \\
+            | xargs -rn1 basename | xargs -rn1 gh workflow enable -R ${GITHUB_REPOSITORY}
+          \`\`\`
+
+          **2. Reset the 60-day clock: push a real commit to \`main\`.**
+          Any genuine change works: a doc fix, a CHANGELOG entry, a dependency
+          bump. Do not automate this step (bot commits, a scheduled re-enable):
+          GitHub treats it as a terms violation.
+
+          **3. Confirm.** Start this audit by hand and check that it is green and
+          says "0 days ago":
+
+          \`\`\`sh
+          gh workflow run audit_pipeline_movement.yml -R ${GITHUB_REPOSITORY}
+          gh run list -w audit_pipeline_movement.yml -L 1 -R ${GITHUB_REPOSITORY}
+          \`\`\`
+
+          Background: docs/user_guide.md, "When GitHub says a workflow will be disabled soon".
+          EOF
             exit 1
           fi
 
